@@ -5,7 +5,7 @@
 
 ## TL;DR
 
-SupplyPulse là portfolio project của một **Analytics Engineer** giải quyết bài toán chuỗi cung ứng có thật ở Bosch:
+SupplyPulse là portfolio project của một **Analytics Engineer** giải quyết bài toán chuỗi cung ứng có ở 1 công ty về linh kiện oto:
 - Lấy bảng SE16 (VBAK, VBAP, EKKO, EKPO, MARA, MARC, ...) làm nguồn
 - Đổ vào lakehouse (Postgres bronze → silver → gold)
 - Transform bằng dbt
