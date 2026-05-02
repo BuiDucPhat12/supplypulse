@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.vscode/
+.DS_Store
+.pytest_cache/
+.coverage
+htmlcov/
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+mlruns/
+data/
+*.parquet
+*.duckdb
