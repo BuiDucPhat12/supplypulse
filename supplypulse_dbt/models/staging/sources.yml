@@ -1,0 +1,25 @@
+version: 2
+
+sources:
+  - name: bronze         #tên dùng trong source('bronze', ...)
+    schema: bronze      #schema dùng trong dbt
+    tables:
+      - name: VBAK
+      - name: VBAP
+      - name: EKET
+      - name: EKKO
+      - name: EKPO
+      - name: EQUK
+      - name: EQUP
+      - name: KNA1
+      - name: LFA1
+      - name: LIKP
+      - name: LIPS
+      - name: MARA
+      - name: MARC
+      - name: MARD
+      - name: RESB
+      - name: T001W
+      - name: TFACT
+      - name: VBBE
+      - name: VBUP

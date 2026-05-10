@@ -201,31 +201,43 @@ git branch -M main
 git push -u origin main
 ```
 
-### D.2 Authentication: Personal Access Token (PAT)
+### D.2 Authentication — cách dễ (Git Credential Manager + OAuth)
 
-GitHub không cho push qua password từ 2021. Bạn cần PAT (token).
+Git for Windows đã đi kèm **Git Credential Manager (GCM)**. Bạn KHÔNG cần tạo PAT thủ công — GCM lo qua OAuth flow trong browser.
 
-1. Vào https://github.com/settings/tokens?type=beta
-2. Click *"Generate new token"* → *"Fine-grained personal access token"*
-3. Token name: `supplypulse-laptop`
-4. Expiration: 90 ngày
-5. Repository access: chọn `Only select repositories` → `supplypulse`
-6. Permissions:
-   - Repository permissions: **Contents: Read and write**, **Metadata: Read-only** (auto), **Pull requests: Read and write**
-7. Generate, **copy token ngay** (không show lại được)
+Verify GCM đang được dùng:
 
-### D.3 Push
+```powershell
+git config --global credential.helper
+```
+
+Phải in `manager` hoặc `manager-core`. Nếu trống → chạy lại installer Git for Windows, tick *"Git Credential Manager"*.
+
+### D.3 Push lần đầu
 
 ```powershell
 git remote add origin https://github.com/<your-username>/supplypulse.git
 git push -u origin main
 ```
 
-Khi prompt username/password:
-- Username: GitHub username của bạn
-- Password: **paste PAT** (không phải password GitHub)
+Khi push:
+1. Browser tự bật, mở trang GitHub login
+2. Login GitHub bình thường (username + password thật)
+3. GitHub hỏi authorize Git Credential Manager → click **Authorize**
+4. Browser đóng, terminal báo `push successful`
 
-Tip: Windows credential manager sẽ nhớ PAT cho lần sau. Một lần khổ, mãi mãi sướng.
+Lần sau push không hỏi lại — GCM đã lưu token.
+
+### D.4 (Chỉ đọc khi browser flow fail) — Fallback PAT thủ công
+
+Nếu trên máy công ty có proxy/VPN chặn OAuth, làm theo cách cũ:
+
+1. https://github.com/settings/tokens?type=beta → *"Generate new token (fine-grained)"*
+2. Name: `supplypulse-laptop`, Expiration 90 ngày
+3. Repository access: `Only select repositories` → `supplypulse`
+4. Permissions: **Contents: Read/write**, **Metadata: Read**, **Pull requests: Read/write**
+5. Copy token (chỉ show 1 lần)
+6. Khi `git push` prompt password → paste token (không phải password GitHub)
 
 ### D.4 Verify
 

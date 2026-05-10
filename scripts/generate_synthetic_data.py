@@ -118,17 +118,20 @@ def gen_mara(ctx: dict, n: int = 500) -> pd.DataFrame:
     mat_groups = ["MG001", "MG002", "MG003", "MG004", "MG005"]
     rows = []
     material_uom: dict[str, str] = {}
+    material_group: dict[str, str] = {}
     for i in range(1, n + 1):
         matnr = _pad(i, 18)
         meins = random.choice(MEINS_VALS)
+        matkl = random.choice(mat_groups)
         material_uom[matnr] = meins
+        material_group[matnr] = matkl
         rows.append(
             {
                 "MANDT": MANDT,
                 "MATNR": matnr,
                 "MTART": random.choice(MTART_VALS),
                 "MBRSH": "M",
-                "MATKL": random.choice(mat_groups),
+                "MATKL": matkl,
                 "MEINS": meins,
                 "BRGEW": _qty(0.1, 50.0),
                 "GEWEI": "KG",
@@ -138,6 +141,7 @@ def gen_mara(ctx: dict, n: int = 500) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     ctx["material_ids"] = [r["MATNR"] for r in rows]
     ctx["material_uom"] = material_uom
+    ctx["material_group"] = material_group
     _write(df, "MARA")
     return df
 
@@ -194,11 +198,12 @@ def gen_lfa1(ctx: dict, n: int = 50) -> pd.DataFrame:
 def gen_marc(ctx: dict) -> pd.DataFrame:
     ekgrp_vals = ["B01", "B02", "B03"]
     disls_vals = ["EX", "FX", "MB"]
+    dispo_vals = [f"D{i:03d}" for i in range(1, 6)]
+    maabc_vals = ["A", "B", "C"]
     rows = []
     for matnr in ctx["material_ids"]:
         n_plants = random.randint(1, 3)
         for werks in random.sample(ctx["plant_ids"], min(n_plants, len(ctx["plant_ids"]))):
-            lgort_pool = ctx["storage_locs"][werks]
             rows.append(
                 {
                     "MANDT": MANDT,
@@ -206,18 +211,15 @@ def gen_marc(ctx: dict) -> pd.DataFrame:
                     "WERKS": werks,
                     "EKGRP": random.choice(ekgrp_vals),
                     "DISMM": random.choice(DISMM_VALS),
+                    "DISPO": random.choice(dispo_vals),
                     "DISLS": random.choice(disls_vals),
                     "MINBE": _qty(10, 200),
                     "EISBE": _qty(5, 100),
                     "MABST": _qty(500, 5000),
                     "BESKZ": random.choice(BESKZ_VALS),
-                    "SOBSL": "",
                     "PLIFZ": random.randint(1, 60),
                     "WEBAZ": random.randint(0, 5),
-                    "DZEIT": random.randint(0, 30),
-                    "LGPRO": random.choice(lgort_pool),
-                    "LGFSB": random.choice(lgort_pool),
-                    "MMSTA": "",
+                    "MAABC": random.choice(maabc_vals),
                 }
             )
     df = pd.DataFrame(rows).drop_duplicates(subset=["MATNR", "WERKS"])
@@ -241,9 +243,7 @@ def gen_mard(ctx: dict) -> pd.DataFrame:
                     "LABST": _qty(0, 1000),
                     "UMLME": _qty(0, 50),
                     "INSME": _qty(0, 30),
-                    "EINME": 0.0,
                     "SPEME": 0.0,
-                    "RETME": 0.0,
                     "LFGJA": "2024",
                     "LFMON": str(random.randint(1, 12)).zfill(2),
                 }
@@ -322,15 +322,18 @@ def gen_vbak(ctx: dict, n: int = 6000) -> pd.DataFrame:
     order_customer: dict[str, str] = {}
     order_dates: dict[str, date] = {}
     order_waerk: dict[str, str] = {}
+    order_auart: dict[str, str] = {}
     for i in range(1, n + 1):
         vbeln = _pad(i, 10)
         kunnr = random.choice(ctx["customer_ids"])
         erdat = _rdate()
         waerk = random.choice(WAERS_VALS)
+        auart = random.choice(AUART_VALS)
         order_ids.append(vbeln)
         order_customer[vbeln] = kunnr
         order_dates[vbeln] = erdat
         order_waerk[vbeln] = waerk
+        order_auart[vbeln] = auart
         rows.append(
             {
                 "MANDT": MANDT,
@@ -338,7 +341,7 @@ def gen_vbak(ctx: dict, n: int = 6000) -> pd.DataFrame:
                 "ERDAT": _fmt(erdat),
                 "ERZET": f"{random.randint(6, 18):02d}{random.randint(0, 59):02d}{random.randint(0, 59):02d}",
                 "ERNAM": random.choice(SAP_USERS),
-                "AUART": random.choice(AUART_VALS),
+                "AUART": auart,
                 "KUNNR": kunnr,
                 "NETWR": _price(100, 50000),
                 "WAERK": waerk,
@@ -353,6 +356,7 @@ def gen_vbak(ctx: dict, n: int = 6000) -> pd.DataFrame:
     ctx["order_customer"] = order_customer
     ctx["order_dates"] = order_dates
     ctx["order_waerk"] = order_waerk
+    ctx["order_auart"] = order_auart
     _write(df, "VBAK")
     return df
 
@@ -388,6 +392,7 @@ def gen_vbap(ctx: dict) -> pd.DataFrame:
                     "VBELN": vbeln,
                     "POSNR": posnr,
                     "MATNR": matnr,
+                    "MATKL": ctx["material_group"][matnr],
                     "MENGE": qty,
                     "MEINS": meins,
                     "NETWR": _price(10, 5000),
@@ -396,6 +401,7 @@ def gen_vbap(ctx: dict) -> pd.DataFrame:
                     "LGORT": lgort,
                     "PSTYV": random.choice(pstyv_vals),
                     "ABGRU": "",
+                    "ERDAT": _fmt(ctx["order_dates"][vbeln]),
                 }
             )
         order_to_items[vbeln] = items_for_order
@@ -415,8 +421,9 @@ def gen_likp(ctx: dict, coverage: float = 0.90) -> pd.DataFrame:
     for i, vbeln_ord in enumerate(chosen_orders, start=1):
         vbeln_del = _pad(8_000_000_000 + i, 10)
         kunnr = ctx["order_customer"][vbeln_ord]
-        bldat = ctx["order_dates"][vbeln_ord] + timedelta(days=random.randint(1, 5))
-        wadat = bldat + timedelta(days=random.randint(1, 10))
+        erdat = ctx["order_dates"][vbeln_ord] + timedelta(days=random.randint(1, 3))
+        lfdat = erdat + timedelta(days=random.randint(3, 14))
+        wadat = lfdat + timedelta(days=random.randint(-2, 2))
         wadat_ist = wadat + timedelta(days=random.randint(-2, 5))
         delivery_ids.append(vbeln_del)
         delivery_order[vbeln_del] = vbeln_ord
@@ -425,20 +432,16 @@ def gen_likp(ctx: dict, coverage: float = 0.90) -> pd.DataFrame:
                 "MANDT": MANDT,
                 "VBELN": vbeln_del,
                 "LFART": random.choice(LFART_VALS),
-                "BLDAT": _fmt(min(bldat, DATE_END)),
+                "ERDAT": _fmt(min(erdat, DATE_END)),
+                "LFDAT": _fmt(min(lfdat, DATE_END)),
                 "WADAT": _fmt(min(wadat, DATE_END)),
                 "WADAT_IST": _fmt(min(wadat_ist, DATE_END)),
-                "KODAT": _fmt(min(bldat, DATE_END)),
-                "LADDT": _fmt(min(bldat + timedelta(1), DATE_END)),
-                "TDDAT": _fmt(min(bldat, DATE_END)),
                 "KUNNR": kunnr,
-                "KUNAG": kunnr,
                 "VKORG": "1000",
                 "VSTEL": random.choice(ctx["plant_ids"]),
                 "ROUTE": f"R{random.randint(1, 3):05d}",
-                "INCO1": random.choice(INCO1_VALS),
-                "BTGEW": _qty(1, 500),
-                "GEWEI": "KG",
+                "NETWR": _price(100, 20000),
+                "WAERK": ctx["order_waerk"][vbeln_ord],
             }
         )
     df = pd.DataFrame(rows)
@@ -449,7 +452,6 @@ def gen_likp(ctx: dict, coverage: float = 0.90) -> pd.DataFrame:
 
 
 def gen_lips(ctx: dict) -> pd.DataFrame:
-    pstyv_vals = ["TAN", "TANN"]
     rows = []
     for vbeln_del in ctx["delivery_ids"]:
         vbeln_ord = ctx["delivery_order"][vbeln_del]
@@ -457,6 +459,7 @@ def gen_lips(ctx: dict) -> pd.DataFrame:
         if not items:
             continue
         n_del_items = random.randint(1, min(5, len(items)))
+        del_date = ctx["order_dates"][vbeln_ord] + timedelta(days=random.randint(3, 14))
         for del_pos, (ord_vbeln, ord_posnr) in enumerate(
             random.sample(items, n_del_items), start=1
         ):
@@ -467,18 +470,16 @@ def gen_lips(ctx: dict) -> pd.DataFrame:
                     "VBELN": vbeln_del,
                     "POSNR": _pad(del_pos * 10, 6),
                     "MATNR": info["MATNR"],
+                    "MATKL": ctx["material_group"][info["MATNR"]],
                     "LFIMG": info["MENGE"],
-                    "LGMNG": info["MENGE"],
-                    "VRKME": info["MEINS"],
+                    "MEINS": info["MEINS"],
                     "WERKS": info["WERKS"],
                     "LGORT": info["LGORT"],
-                    "CHARG": "",
                     "VGBEL": ord_vbeln,
                     "VGPOS": ord_posnr,
-                    "WBSTA": random.choices(["A", "B", "C"], weights=[20, 30, 50])[0],
-                    "PSTYV": random.choice(pstyv_vals),
-                    "NTGEW": _qty(0.5, 100),
-                    "BRGEW": _qty(1, 120),
+                    "NETWR": _price(10, 5000),
+                    "BWART": random.choice(BWART_VALS),
+                    "MBDAT": _fmt(min(del_date, DATE_END)),
                 }
             )
     df = pd.DataFrame(rows)
@@ -513,20 +514,23 @@ def gen_vbbe(ctx: dict, n: int = 15000) -> pd.DataFrame:
     rows = []
     for vbeln, posnr in sample:
         info = ctx["order_item_data"][(vbeln, posnr)]
-        req_date = ctx["order_dates"][vbeln] + timedelta(days=random.randint(1, 30))
+        mbdat = ctx["order_dates"][vbeln] + timedelta(days=random.randint(1, 30))
+        omeng = info["MENGE"]
+        vmeng = round(omeng * random.uniform(0.8, 1.0), 2)
         rows.append(
             {
                 "MANDT": MANDT,
-                "MATNR": info["MATNR"],
-                "WERKS": info["WERKS"],
-                "LGORT": info["LGORT"],
-                "BDART": random.choice(BDART_VALS),
                 "VBELN": vbeln,
                 "POSNR": posnr,
-                "BDMNG": info["MENGE"],
+                "MATNR": info["MATNR"],
+                "WERKS": info["WERKS"],
+                "MBDAT": _fmt(min(mbdat, DATE_END)),
+                "OMENG": omeng,
+                "VMENG": vmeng,
                 "MEINS": info["MEINS"],
-                "BDDAT": _fmt(min(req_date, DATE_END)),
-                "AEDAT": _fmt(min(req_date + timedelta(1), DATE_END)),
+                "BDART": random.choice(BDART_VALS),
+                "AUART": ctx["order_auart"][vbeln],
+                "KUNNR": ctx["order_customer"][vbeln],
             }
         )
     df = pd.DataFrame(rows)
@@ -539,6 +543,7 @@ def gen_vbbe(ctx: dict, n: int = 15000) -> pd.DataFrame:
 
 def gen_ekko(ctx: dict, n: int = 1800) -> pd.DataFrame:
     ekgrp_vals = ["B01", "B02", "B03"]
+    inco2_vals = ["Hamburg", "Rotterdam", "Stuttgart", "Munich", ""]
     rows = []
     po_ids: list[str] = []
     po_dates: dict[str, date] = {}
@@ -561,6 +566,10 @@ def gen_ekko(ctx: dict, n: int = 1800) -> pd.DataFrame:
                 "EKGRP": random.choice(ekgrp_vals),
                 "BEDAT": _fmt(bedat),
                 "WAERS": waers,
+                "STATU": random.choices(["", "1", "4", "5", "7"], weights=[20, 10, 30, 30, 10])[0],
+                "LOEKZ": random.choices(["", "L"], weights=[90, 10])[0],
+                "INCO1": random.choice(INCO1_VALS),
+                "INCO2": random.choice(inco2_vals),
             }
         )
     df = pd.DataFrame(rows)
@@ -598,13 +607,15 @@ def gen_ekpo(ctx: dict) -> pd.DataFrame:
                     "EBELN": ebeln,
                     "EBELP": ebelp,
                     "MATNR": matnr,
+                    "WERKS": werks,
+                    "MATKL": ctx["material_group"][matnr],
                     "MENGE": qty,
                     "MEINS": meins,
                     "NETPR": _price(5, 1000),
-                    "PEINH": 1.0,
-                    "WERKS": werks,
-                    "EINDT": _fmt(min(eindt, DATE_END)),
+                    "NETWR": round(qty * _price(5, 1000), 2),
+                    "PSTYP": random.choices(["0", "2", "9"], weights=[70, 20, 10])[0],
                     "ELIKZ": random.choices(["", "X"], weights=[60, 40])[0],
+                    "LOEKZ": random.choices(["", "L"], weights=[95, 5])[0],
                 }
             )
     df = pd.DataFrame(rows)
@@ -620,7 +631,7 @@ def gen_eket(ctx: dict) -> pd.DataFrame:
         item = ctx["po_item_data"][(ebeln, ebelp)]
         eindt = item["EINDT"]
         gr_qty = round(item["MENGE"] * random.uniform(0, 1), 2)
-        gr_date = min(eindt + timedelta(days=random.randint(0, 10)), DATE_END)
+        mbdat = min(eindt - timedelta(days=random.randint(1, 5)), DATE_END)
         rows.append(
             {
                 "MANDT": MANDT,
@@ -631,10 +642,9 @@ def gen_eket(ctx: dict) -> pd.DataFrame:
                 "SLFDT": _fmt(min(eindt + timedelta(days=random.randint(-3, 3)), DATE_END)),
                 "MENGE": item["MENGE"],
                 "WEMNG": gr_qty,
-                "WEDAT": _fmt(gr_date) if gr_qty > 0 else "",
-                "GLMNG": round(item["MENGE"] - gr_qty, 2),
                 "BANFN": _pad(random.randint(1, 9999), 10),
-                "BNFPO": _pad(random.randint(1, 5) * 10, 5),
+                "MBDAT": _fmt(mbdat),
+                "WADAT": _fmt(min(eindt + timedelta(days=random.randint(0, 3)), DATE_END)),
             }
         )
     df = pd.DataFrame(rows)
