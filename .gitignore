@@ -11,7 +11,13 @@ htmlcov/
 dbt/target/
 dbt/dbt_packages/
 dbt/logs/
+supplypulse_dbt/target/
+supplypulse_dbt/dbt_packages/
+supplypulse_dbt/logs/
 mlruns/
 data/
 *.parquet
 *.duckdb
+.claude/
+logs/
+docs/notes/.obsidian/
