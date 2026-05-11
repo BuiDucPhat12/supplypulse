@@ -6,7 +6,7 @@ renamed_vbak AS (
 
 SELECT
     vbak.vbeln AS sales_order_id,
-    vbak.erdat AS created_date,
+    vbak.erdat::date AS created_date,
     vbak.erzet AS created_time,
     vbak.ernam AS created_by,
     vbak.auart AS sales_document_type,
