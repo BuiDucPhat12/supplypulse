@@ -1,0 +1,38 @@
+version: 2
+
+models:
+  - name: mart_shortage_report
+    description: "Summary per material — output chính cho dashboard Page 1"
+    columns:
+      - name: marc_id
+        tests:
+          - unique
+          - not_null
+      - name: status
+        tests:
+          - accepted_values:
+              values: ['Shortage', 'No Shortage']
+
+  - name: mart_inventory_simulation
+    description: "Tồn kho mô phỏng 120 ngày per material — dashboard Page 2"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - marc_id
+            - calendar_date
+
+  - name: mart_consumption
+    description: "Daily demand per material — dashboard Page 4"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - marc_id
+            - requirement_date
+
+  - name: mart_vendor_performance
+    description: "Vendor scorecard (OTD, late shipments, TT) — dashboard Page 3"
+    columns:
+      - name: vendor_number
+        tests:
+          - unique
+          - not_null

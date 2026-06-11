@@ -1,0 +1,45 @@
+version: 2
+
+models:
+  - name: int_pn_infor
+    description: "Material context: stock + planning params, grain marc_id"
+    columns:
+      - name: marc_id
+        tests:
+          - unique
+          - not_null
+      - name: available_stock
+        tests:
+          - not_null
+
+  - name: int_factory_calendar
+    description: "Calendar mọi ngày per plant, range động quanh CURRENT_DATE"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - plant
+            - calendar_date
+
+  - name: int_working_calendar
+    description: "Working days only + working_day_index"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - plant
+            - calendar_date
+
+  - name: int_inbound_deliveries_asn
+    description: "ASN chưa GR hoàn tất + planned_availability_date + status"
+    columns:
+      - name: asn_status
+        tests:
+          - accepted_values:
+              values: ['future', 'overdue', 'pending']
+
+  - name: int_tt_quota
+    description: "TT + quota per material × vendor"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - marc_id
+            - vendor_number

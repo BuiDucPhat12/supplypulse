@@ -5,6 +5,7 @@ WITH source AS (
 renamed AS (
     SELECT
         ebeln || '-' || ebelp       AS ekpo_id,
+        matnr || '-' || werks       AS marc_id,
         ebeln                       AS po_number,
         ebelp                       AS po_item,
         matnr                       AS material_number,

@@ -36,7 +36,7 @@ demand_with_key AS (
 overdue_per_pn AS (
     SELECT
         marc_id,
-        COALESCE(SUM(demand_qty) FILTER (WHERE requirement_date < DATE '2024-09-01'), 0) AS backlog_per_pn
+        COALESCE(SUM(demand_qty) FILTER (WHERE requirement_date < CURRENT_DATE), 0) AS backlog_per_pn
     FROM demand_with_key
     GROUP BY marc_id
 ),
@@ -46,7 +46,7 @@ overdue_per_pn_contype AS (
         marc_id,
         demand_source,
         requirement_type,
-        COALESCE(SUM(demand_qty) FILTER (WHERE requirement_date < DATE '2024-09-01'), 0) AS backlog_per_pn_contype
+        COALESCE(SUM(demand_qty) FILTER (WHERE requirement_date < CURRENT_DATE), 0) AS backlog_per_pn_contype
     FROM demand_with_key
     GROUP BY marc_id, demand_source, requirement_type
 ),
@@ -71,7 +71,7 @@ future_with_overdue AS (
         ON d.marc_id = ct.marc_id
         AND d.demand_source = ct.demand_source
         AND d.requirement_type = ct.requirement_type
-    WHERE d.requirement_date BETWEEN DATE '2024-09-01' AND DATE '2024-09-01' + INTERVAL '120 days'
+    WHERE d.requirement_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '120 days'
 ),
 
 null_rows AS (
@@ -93,7 +93,7 @@ null_rows AS (
           SELECT 1
           FROM demand_with_key d
           WHERE d.marc_id = pn.marc_id
-            AND d.requirement_date >= DATE '2024-09-01'
+            AND d.requirement_date >= CURRENT_DATE
       )
 )
 

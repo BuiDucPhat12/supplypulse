@@ -1,0 +1,12 @@
+supplypulse_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: postgres
+      port: 5432
+      user: supplypulse
+      password: supplypulse123
+      dbname: supplypulse
+      schema: public
+      threads: 4

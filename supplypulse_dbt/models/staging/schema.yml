@@ -1,0 +1,49 @@
+version: 2
+
+models:
+  - name: stg_marc
+    description: "Material planning data per plant"
+    columns:
+      - name: marc_id
+        tests:
+          - unique
+          - not_null
+      - name: procurement_type
+        tests:
+          - accepted_values:
+              values: ['F', 'E', 'X']
+
+  - name: stg_ekko
+    description: "PO/SA header"
+    columns:
+      - name: po_number
+        tests:
+          - unique
+          - not_null
+
+  - name: stg_ekpo
+    description: "PO/SA line items"
+    columns:
+      - name: ekpo_id
+        tests:
+          - unique
+          - not_null
+      - name: marc_id
+        tests:
+          - not_null
+
+  - name: stg_vbup
+    description: "SD document item status"
+    columns:
+      - name: goods_movement_status
+        tests:
+          - accepted_values:
+              values: ['A', 'B', 'C']
+
+  - name: stg_likp
+    description: "Inbound delivery header (ASN)"
+    columns:
+      - name: delivery_number
+        tests:
+          - unique
+          - not_null

@@ -1,3 +1,20 @@
+x-airflow-common: &airflow-common
+    image: apache/airflow:2.9.3
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      DBT_PROFILES_DIR: /opt/airflow/dbt_profiles
+      _PIP_ADDITIONAL_REQUIREMENTS: "dbt-postgres==1.9.0 faker pandas sqlalchemy"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs/airflow:/opt/airflow/logs
+      - ./profiles:/opt/airflow/dbt_profiles
+      - .:/opt/airflow/project
+    depends_on:
+      postgres:
+        condition: service_started
+    user: "${AIRFLOW_UID:-50000}:0"
 services:
   postgres:
     image: postgres:15-alpine
@@ -9,5 +26,25 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+
+  airflow-init:
+    <<: *airflow-common
+    command: >
+      bash -c "pip install dbt-postgres==1.9.0 &&
+                airflow db migrate &&
+                airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com"
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    restart: always
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: always
 volumes:
   postgres_data:

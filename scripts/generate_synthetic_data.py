@@ -1,9 +1,26 @@
-"""Generate synthetic SAP ECC 6.0 CSV files mimicking SE16 extracts.
+"""Generate synthetic SAP ECC 6.0 CSV files mimicking SE16 extracts — v2 (realistic).
 
-Layer 0 → Layer 4 must run in order to preserve FK consistency.
-Output: data/raw/se16/<TABLE>/<TABLE>_20241231.csv
+v2 redesign goals (see docs/notes/07_synthetic_data_v2_criteria.md):
+  1. Anchor-relative dates: 24 months history + 6 months future around --anchor
+     (default: today). Removes the hardcoded DATE '2024-09-01' workaround in dbt.
+  2. Skewed distributions: ABC material classes, Zipf customer/vendor share,
+     lognormal quantities — instead of uniform everything.
+  3. Entity personas: each vendor has lead-time + OTD characteristics (incl. a few
+     chronically late vendors); each material has a stable price and demand profile.
+  4. Causal consistency: statuses derive from dates vs anchor, goods receipts only
+     after due dates, NETWR = MENGE x NETPR, VBBE only for genuinely open items.
+  5. Demand-supply balance with controlled anomalies: stock sized to demand,
+     ~8% of material-plant combos engineered into shortage.
+  6. LIKP/LIPS are INBOUND deliveries (ASN): LIPS.VGBEL -> EKKO.EBELN, matching
+     how the dbt intermediate layer traces vendors (int_inbound_deliveries).
+     VBUP carries GR status for delivery items ('C' = goods receipt complete).
+
+Layer 0 -> 4 must run in order to preserve FK consistency.
+Output: data/raw/se16/<TABLE>/<TABLE>_<ANCHOR:YYYYMMDD>.csv
 """
 
+import argparse
+import math
 import random
 from datetime import date, timedelta
 from pathlib import Path
@@ -16,19 +33,26 @@ random.seed(42)
 Faker.seed(42)
 
 MANDT = "100"
-DATE_START = date(2022, 1, 1)
-DATE_END = date(2024, 12, 31)
 OUT_DIR = Path("data/raw/se16")
-SUFFIX = "_20241231.csv"
+
+# Set in main() from --anchor
+ANCHOR: date = date.today()
+HIST_START: date = ANCHOR - timedelta(days=730)
+DEMAND_END: date = ANCHOR + timedelta(days=130)
+SUPPLY_END: date = ANCHOR + timedelta(days=180)
+SUFFIX: str = ""
+
+N_MATERIALS = 500
+N_CUSTOMERS = 100
+N_VENDORS = 50
+N_ORDERS = 6000
+N_BAD_VENDORS = 3
+SHORTAGE_RATIO = 0.08  # share of material-plant combos engineered into shortage
 
 AUART_VALS = ["OR", "ZOR", "RE"]
-LFART_VALS = ["LF", "LFRE"]
 BSART_VALS = ["NB", "FO", "UB"]
 MTART_VALS = ["ROH", "FERT", "HALB", "HIBE"]
-BESKZ_VALS = ["E", "F", "X"]
 DISMM_VALS = ["PD", "VB", "ND"]
-STATUS_VALS = ["A", "B", "C"]
-BWART_VALS = ["101", "601", "301"]
 WAERS_VALS = ["EUR", "USD", "VND"]
 MEINS_VALS = ["EA", "KG", "L", "M", "ST"]
 INCO1_VALS = ["EXW", "DAP", "CIF", "DDP"]
@@ -37,8 +61,7 @@ SAP_USERS = [f"USER{i:04d}" for i in range(1, 51)]
 REGION_CODES = ["BW", "BY", "BE", "SN", "HH", "HE", "NW", "RP"]
 
 
-def _rdate(start: date = DATE_START, end: date = DATE_END) -> date:
-    return start + timedelta(days=random.randint(0, (end - start).days))
+# ─── Helpers ─────────────────────────────────────────────────────────────────
 
 
 def _fmt(d: date) -> str:
@@ -49,17 +72,39 @@ def _pad(n: int, w: int = 10) -> str:
     return str(n).zfill(w)
 
 
-def _qty(lo: float = 1.0, hi: float = 500.0) -> float:
-    return round(random.uniform(lo, hi), 2)
+def _lognorm(mean: float, sigma: float, lo: float, hi: float) -> float:
+    return round(min(max(random.lognormvariate(math.log(mean), sigma), lo), hi), 2)
 
 
-def _price(lo: float = 10.0, hi: float = 2000.0) -> float:
-    return round(random.uniform(lo, hi), 2)
+def _is_wd(d: date) -> bool:
+    return d.weekday() < 5
+
+
+def _next_wd(d: date) -> date:
+    while not _is_wd(d):
+        d += timedelta(days=1)
+    return d
+
+
+def _day_weight(d: date) -> float:
+    """Trend x yearly seasonality x weekday pattern for business activity."""
+    t = (d - HIST_START).days / max((ANCHOR - HIST_START).days, 1)
+    trend = 1.0 + 0.25 * t
+    doy = d.timetuple().tm_yday
+    season = 1.0 + 0.18 * math.sin(2 * math.pi * (doy - 60) / 365.0)
+    weekday = [1.10, 1.15, 1.10, 1.05, 0.90, 0.0, 0.0][d.weekday()]
+    return trend * season * weekday
+
+
+def _date_range(start: date, end: date) -> list[date]:
+    return [start + timedelta(days=i) for i in range((end - start).days + 1)]
 
 
 def _write(df: pd.DataFrame, table: str) -> None:
     p = OUT_DIR / table
     p.mkdir(parents=True, exist_ok=True)
+    for old in p.glob(f"{table}_*.csv"):  # drop stale extracts so the loader sees one file
+        old.unlink()
     df.to_csv(p / f"{table}{SUFFIX}", index=False, encoding="utf-8")
     print(f"  {table:10s}: {len(df):>7,} rows")
 
@@ -111,16 +156,43 @@ def gen_tfact(ctx: dict) -> pd.DataFrame:
     return df
 
 
-# ─── Layer 1 — Master Data ───────────────────────────────────────────────────
+# ─── Layer 1 — Master data + personas ────────────────────────────────────────
 
 
-def gen_mara(ctx: dict, n: int = 500) -> pd.DataFrame:
+def build_material_personas(ctx: dict) -> None:
+    """ABC classes drive popularity, order-line size and stock policy."""
+    personas: dict[str, dict] = {}
+    classes = ["A"] * 50 + ["B"] * 100 + ["C"] * 350
+    random.shuffle(classes)
+    for i in range(1, N_MATERIALS + 1):
+        matnr = _pad(i, 18)
+        cls = classes[i - 1]
+        if cls == "A":
+            popularity = random.uniform(6.0, 12.0)
+            base_qty = _lognorm(60, 0.5, 5, 2000)
+        elif cls == "B":
+            popularity = random.uniform(2.0, 5.0)
+            base_qty = _lognorm(25, 0.5, 2, 800)
+        else:
+            popularity = random.uniform(0.3, 1.5)
+            base_qty = _lognorm(8, 0.6, 1, 300)
+        personas[matnr] = {
+            "class": cls,
+            "popularity": popularity,
+            "base_qty": base_qty,
+            "price": _lognorm(40, 1.0, 2, 3000),  # stable sales price per unit
+        }
+    ctx["mat_persona"] = personas
+    ctx["material_ids"] = list(personas)
+    ctx["mat_weights"] = [p["popularity"] for p in personas.values()]
+
+
+def gen_mara(ctx: dict) -> pd.DataFrame:
     mat_groups = ["MG001", "MG002", "MG003", "MG004", "MG005"]
     rows = []
     material_uom: dict[str, str] = {}
     material_group: dict[str, str] = {}
-    for i in range(1, n + 1):
-        matnr = _pad(i, 18)
+    for matnr in ctx["material_ids"]:
         meins = random.choice(MEINS_VALS)
         matkl = random.choice(mat_groups)
         material_uom[matnr] = meins
@@ -133,20 +205,19 @@ def gen_mara(ctx: dict, n: int = 500) -> pd.DataFrame:
                 "MBRSH": "M",
                 "MATKL": matkl,
                 "MEINS": meins,
-                "BRGEW": _qty(0.1, 50.0),
+                "BRGEW": _lognorm(5, 1.0, 0.1, 50),
                 "GEWEI": "KG",
-                "ERSDA": _fmt(_rdate(date(2018, 1, 1), date(2021, 12, 31))),
+                "ERSDA": _fmt(HIST_START - timedelta(days=random.randint(180, 1500))),
             }
         )
     df = pd.DataFrame(rows)
-    ctx["material_ids"] = [r["MATNR"] for r in rows]
     ctx["material_uom"] = material_uom
     ctx["material_group"] = material_group
     _write(df, "MARA")
     return df
 
 
-def gen_kna1(ctx: dict, n: int = 100) -> pd.DataFrame:
+def gen_kna1(ctx: dict) -> pd.DataFrame:
     rows = [
         {
             "MANDT": MANDT,
@@ -157,236 +228,206 @@ def gen_kna1(ctx: dict, n: int = 100) -> pd.DataFrame:
             "PSTLZ": fake.postcode()[:10],
             "REGIO": random.choice(REGION_CODES),
             "KTOKD": "0001",
-            "ERDAT": _fmt(_rdate(date(2015, 1, 1), date(2021, 12, 31))),
+            "ERDAT": _fmt(HIST_START - timedelta(days=random.randint(90, 2000))),
         }
-        for i in range(1, n + 1)
+        for i in range(1, N_CUSTOMERS + 1)
     ]
     df = pd.DataFrame(rows)
     ctx["customer_ids"] = [r["KUNNR"] for r in rows]
+    # Zipf-like share: a few key accounts drive most order volume
+    ctx["customer_weights"] = [1.0 / (rank**0.9) for rank in range(1, N_CUSTOMERS + 1)]
     _write(df, "KNA1")
     return df
 
 
-def gen_lfa1(ctx: dict, n: int = 50) -> pd.DataFrame:
-    rows = [
-        {
-            "MANDT": MANDT,
-            "LIFNR": _pad(i, 10),
-            "LAND1": random.choice(["DE", "AT", "CH", "CN", "JP"]),
-            "NAME1": fake.company()[:35],
-            "ORT01": fake.city()[:35],
-            "PSTLZ": fake.postcode()[:10],
-            "REGIO": random.choice(REGION_CODES),
-            "KTOKK": "0001",
-            "STCD1": "",
-            "ERDAT": _fmt(_rdate(date(2015, 1, 1), date(2021, 12, 31))),
-            "ERNAM": random.choice(SAP_USERS),
-            "SPERR": "",
-            "XCPDK": "",
+def gen_lfa1(ctx: dict) -> pd.DataFrame:
+    personas: dict[str, dict] = {}
+    bad_vendors = set(random.sample(range(1, N_VENDORS + 1), N_BAD_VENDORS))
+    rows = []
+    for i in range(1, N_VENDORS + 1):
+        lifnr = _pad(i, 10)
+        is_bad = i in bad_vendors
+        personas[lifnr] = {
+            "lt_mean": random.uniform(7, 40),  # purchase lead time (days)
+            "lt_std": random.uniform(1, 4),
+            "otd_rate": random.uniform(0.45, 0.62) if is_bad else random.uniform(0.86, 0.98),
+            "late_extra": random.uniform(5, 20) if is_bad else random.uniform(2, 7),
+            "share": 1.0 / (i**0.85),  # Zipf: top vendors win most quota
+            "is_bad": is_bad,
         }
-        for i in range(1, n + 1)
-    ]
+        rows.append(
+            {
+                "MANDT": MANDT,
+                "LIFNR": lifnr,
+                "LAND1": random.choice(["DE", "AT", "CH", "CN", "JP"]),
+                "NAME1": fake.company()[:35],
+                "ORT01": fake.city()[:35],
+                "PSTLZ": fake.postcode()[:10],
+                "REGIO": random.choice(REGION_CODES),
+                "KTOKK": "0001",
+                "STCD1": "",
+                "ERDAT": _fmt(HIST_START - timedelta(days=random.randint(90, 2000))),
+                "ERNAM": random.choice(SAP_USERS),
+                "SPERR": "",
+                "XCPDK": "",
+            }
+        )
     df = pd.DataFrame(rows)
     ctx["vendor_ids"] = [r["LIFNR"] for r in rows]
+    ctx["vendor_persona"] = personas
     _write(df, "LFA1")
     return df
 
 
-# ─── Layer 2 — Master Data Extended ─────────────────────────────────────────
+# ─── Layer 2 — Material-plant combos, quota arrangements ────────────────────
 
 
-def gen_marc(ctx: dict) -> pd.DataFrame:
-    ekgrp_vals = ["B01", "B02", "B03"]
-    disls_vals = ["EX", "FX", "MB"]
-    dispo_vals = [f"D{i:03d}" for i in range(1, 6)]
-    maabc_vals = ["A", "B", "C"]
-    rows = []
+def build_marc_combos(ctx: dict) -> None:
+    """Assign plants, procurement type and a vendor panel per material."""
+    combos: list[tuple[str, str]] = []
+    combo_info: dict[tuple[str, str], dict] = {}
+    mat_vendors: dict[str, list[tuple[str, float]]] = {}
+    vendor_ids = ctx["vendor_ids"]
+    vendor_w = [ctx["vendor_persona"][v]["share"] for v in vendor_ids]
     for matnr in ctx["material_ids"]:
-        n_plants = random.randint(1, 3)
-        for werks in random.sample(ctx["plant_ids"], min(n_plants, len(ctx["plant_ids"]))):
-            rows.append(
-                {
-                    "MANDT": MANDT,
-                    "MATNR": matnr,
-                    "WERKS": werks,
-                    "EKGRP": random.choice(ekgrp_vals),
-                    "DISMM": random.choice(DISMM_VALS),
-                    "DISPO": random.choice(dispo_vals),
-                    "DISLS": random.choice(disls_vals),
-                    "MINBE": _qty(10, 200),
-                    "EISBE": _qty(5, 100),
-                    "MABST": _qty(500, 5000),
-                    "BESKZ": random.choice(BESKZ_VALS),
-                    "PLIFZ": random.randint(1, 60),
-                    "WEBAZ": random.randint(0, 5),
-                    "MAABC": random.choice(maabc_vals),
-                }
-            )
-    df = pd.DataFrame(rows).drop_duplicates(subset=["MATNR", "WERKS"])
-    ctx["marc_combos"] = list(zip(df["MATNR"], df["WERKS"], strict=False))
-    _write(df, "MARC")
-    return df
+        n_vnd = random.choices([1, 2, 3], weights=[35, 45, 20])[0]
+        panel: list[str] = []
+        while len(panel) < n_vnd:
+            v = random.choices(vendor_ids, weights=vendor_w)[0]
+            if v not in panel:
+                panel.append(v)
+        shares = [random.uniform(0.5, 1.5) for _ in panel]
+        total = sum(shares)
+        mat_vendors[matnr] = [(v, s / total) for v, s in zip(panel, shares, strict=False)]
+
+        n_plants = random.choices([1, 2, 3], weights=[40, 40, 20])[0]
+        for werks in random.sample(ctx["plant_ids"], n_plants):
+            combos.append((matnr, werks))
+            combo_info[(matnr, werks)] = {
+                "beskz": random.choices(["F", "E", "X"], weights=[85, 10, 5])[0],
+            }
+    ctx["marc_combos"] = combos
+    ctx["combo_info"] = combo_info
+    ctx["mat_vendors"] = mat_vendors
+    ctx["mat_plants"] = {}
+    for matnr, werks in combos:
+        ctx["mat_plants"].setdefault(matnr, []).append(werks)
+    ctx["shortage_combos"] = set(random.sample(combos, max(1, int(len(combos) * SHORTAGE_RATIO))))
 
 
-def gen_mard(ctx: dict) -> pd.DataFrame:
-    rows = []
+def gen_equk_equp(ctx: dict) -> None:
+    """Quota arrangements per externally procured material-plant; mostly valid
+    around the anchor so int_equk_active (CURRENT_DATE check) finds them."""
+    equk_rows, equp_rows = [], []
+    qnum = 0
+    quota_lookup: dict[tuple[str, str], list[tuple[str, float]]] = {}
     for matnr, werks in ctx["marc_combos"]:
-        lgort_pool = ctx["storage_locs"][werks]
-        n_locs = random.randint(1, min(2, len(lgort_pool)))
-        for lgort in random.sample(lgort_pool, n_locs):
-            rows.append(
-                {
-                    "MANDT": MANDT,
-                    "MATNR": matnr,
-                    "WERKS": werks,
-                    "LGORT": lgort,
-                    "LABST": _qty(0, 1000),
-                    "UMLME": _qty(0, 50),
-                    "INSME": _qty(0, 30),
-                    "SPEME": 0.0,
-                    "LFGJA": "2024",
-                    "LFMON": str(random.randint(1, 12)).zfill(2),
-                }
-            )
-    df = pd.DataFrame(rows)
-    ctx["mard_combos"] = list(zip(df["MATNR"], df["WERKS"], df["LGORT"], strict=False))
-    _write(df, "MARD")
-    return df
-
-
-def gen_equk(ctx: dict, n: int = 100) -> pd.DataFrame:
-    rows = []
-    quota_ids: list[str] = []
-    for i in range(1, n + 1):
-        qunum = _pad(i, 10)
-        vdatu = _rdate(date(2022, 1, 1), date(2023, 12, 31))
-        bdatu = min(vdatu + timedelta(days=random.randint(180, 730)), DATE_END)
-        quota_ids.append(qunum)
-        rows.append(
+        if ctx["combo_info"][(matnr, werks)]["beskz"] != "F":
+            continue
+        qnum += 1
+        qunum = _pad(qnum, 10)
+        if random.random() < 0.90:  # active window straddles the anchor
+            vdatu = ANCHOR - timedelta(days=random.randint(60, 400))
+            bdatu = ANCHOR + timedelta(days=random.randint(60, 365))
+        else:  # a few expired arrangements for realism
+            vdatu = ANCHOR - timedelta(days=random.randint(500, 800))
+            bdatu = ANCHOR - timedelta(days=random.randint(10, 120))
+        equk_rows.append(
             {
                 "MANDT": MANDT,
-                "MATNR": random.choice(ctx["material_ids"]),
-                "WERKS": random.choice(ctx["plant_ids"]),
+                "MATNR": matnr,
+                "WERKS": werks,
                 "QUNUM": qunum,
                 "VDATU": _fmt(vdatu),
                 "BDATU": _fmt(bdatu),
-                "SCMNG": _qty(1, 100),
+                "SCMNG": _lognorm(50, 0.6, 1, 500),
                 "ERDAT": _fmt(vdatu),
                 "ERNAM": random.choice(SAP_USERS),
             }
         )
-    df = pd.DataFrame(rows)
-    ctx["quota_ids"] = quota_ids
-    _write(df, "EQUK")
-    return df
-
-
-def gen_equp(ctx: dict) -> pd.DataFrame:
-    rows = []
-    for qunum in ctx["quota_ids"]:
-        n_items = random.randint(1, 3)
-        remaining = 100.0
-        for pos in range(1, n_items + 1):
-            pct = round(remaining / (n_items - pos + 1), 1)
-            remaining = round(remaining - pct, 1)
-            rows.append(
+        quota_lookup[(matnr, werks)] = ctx["mat_vendors"][matnr]
+        for pos, (lifnr, share) in enumerate(ctx["mat_vendors"][matnr], start=1):
+            vp = ctx["vendor_persona"][lifnr]
+            equp_rows.append(
                 {
                     "MANDT": MANDT,
                     "QUNUM": qunum,
                     "QUPOS": _pad(pos, 3),
-                    "BESKZ": random.choice(BESKZ_VALS),
-                    "LIFNR": random.choice(ctx["vendor_ids"]),
-                    "BEWRK": random.choice(ctx["plant_ids"]),
-                    "QUOTE": pct,
-                    "QUBMG": _qty(100, 5000),
-                    "QUMNG": _qty(0, 500),
-                    "MAXMG": _qty(1000, 10000),
-                    "MINLS": _qty(10, 100),
-                    "MAXLS": _qty(100, 1000),
-                    "PLIFZ": random.randint(1, 60),
+                    "BESKZ": "F",
+                    "LIFNR": lifnr,
+                    "BEWRK": werks,
+                    "QUOTE": round(share * 100, 1),
+                    "QUBMG": _lognorm(1000, 0.5, 100, 10000),
+                    "QUMNG": _lognorm(200, 0.7, 0, 5000),
+                    "MAXMG": _lognorm(5000, 0.4, 1000, 20000),
+                    "MINLS": _lognorm(30, 0.5, 5, 200),
+                    "MAXLS": _lognorm(400, 0.5, 50, 2000),
+                    "PLIFZ": round(vp["lt_mean"]),
                     "PREIH": _pad(pos, 2),
                     "VERID": "",
                 }
             )
-    df = pd.DataFrame(rows)
-    _write(df, "EQUP")
-    return df
+    _write(pd.DataFrame(equk_rows), "EQUK")
+    _write(pd.DataFrame(equp_rows), "EQUP")
 
 
-# ─── Layer 3 — Transaction SD ────────────────────────────────────────────────
+# ─── Layer 3 — Transaction SD (sales demand) ─────────────────────────────────
 
 
-def gen_vbak(ctx: dict, n: int = 6000) -> pd.DataFrame:
-    rows = []
-    order_ids: list[str] = []
-    order_customer: dict[str, str] = {}
-    order_dates: dict[str, date] = {}
-    order_waerk: dict[str, str] = {}
-    order_auart: dict[str, str] = {}
-    for i in range(1, n + 1):
-        vbeln = _pad(i, 10)
-        kunnr = random.choice(ctx["customer_ids"])
-        erdat = _rdate()
-        waerk = random.choice(WAERS_VALS)
-        auart = random.choice(AUART_VALS)
-        order_ids.append(vbeln)
-        order_customer[vbeln] = kunnr
-        order_dates[vbeln] = erdat
-        order_waerk[vbeln] = waerk
-        order_auart[vbeln] = auart
-        rows.append(
-            {
-                "MANDT": MANDT,
-                "VBELN": vbeln,
-                "ERDAT": _fmt(erdat),
-                "ERZET": f"{random.randint(6, 18):02d}{random.randint(0, 59):02d}{random.randint(0, 59):02d}",
-                "ERNAM": random.choice(SAP_USERS),
-                "AUART": auart,
-                "KUNNR": kunnr,
-                "NETWR": _price(100, 50000),
-                "WAERK": waerk,
-                "VKORG": "1000",
-                "VTWEG": random.choice(["10", "20"]),
-                "SPART": random.choice(["01", "02"]),
-                "GBSTK": random.choices(STATUS_VALS, weights=[20, 30, 50])[0],
-            }
-        )
-    df = pd.DataFrame(rows)
-    ctx["order_ids"] = order_ids
-    ctx["order_customer"] = order_customer
-    ctx["order_dates"] = order_dates
-    ctx["order_waerk"] = order_waerk
-    ctx["order_auart"] = order_auart
-    _write(df, "VBAK")
-    return df
-
-
-def gen_vbap(ctx: dict) -> pd.DataFrame:
+def gen_sales(ctx: dict) -> None:
+    """VBAK/VBAP with seasonal order dates; VBUP status + VBBE open requirements
+    derived causally from requested date vs anchor."""
+    hist_days = [d for d in _date_range(HIST_START, ANCHOR) if _is_wd(d)]
+    hist_weights = [_day_weight(d) for d in hist_days]
     pstyv_vals = ["TAN", "TANN", "TATX"]
-    rows = []
-    order_items: list[tuple[str, str]] = []
-    order_item_data: dict[tuple[str, str], dict] = {}
-    order_to_items: dict[str, list[tuple[str, str]]] = {}
-    for vbeln in ctx["order_ids"]:
-        n_items = random.randint(1, 7)
-        items_for_order: list[tuple[str, str]] = []
+
+    vbak_rows, vbap_rows, vbbe_rows = [], [], []
+    vbup_rows = ctx.setdefault("vbup_rows", [])
+    demand = ctx.setdefault("demand", {})  # (matnr, werks) -> {"overdue": x, "future": y}
+
+    for i in range(1, N_ORDERS + 1):
+        vbeln = _pad(i, 10)
+        kunnr = random.choices(ctx["customer_ids"], weights=ctx["customer_weights"])[0]
+        erdat = random.choices(hist_days, weights=hist_weights)[0]
+        waerk = random.choices(WAERS_VALS, weights=[80, 15, 5])[0]
+        auart = random.choices(AUART_VALS, weights=[70, 25, 5])[0]
+        n_items = random.choices([2, 3, 4, 5, 6, 7], weights=[20, 25, 22, 15, 10, 8])[0]
+
+        order_netwr = 0.0
+        item_statuses = []
         for pos in range(1, n_items + 1):
             posnr = _pad(pos * 10, 6)
-            matnr = random.choice(ctx["material_ids"])
-            werks = random.choice(ctx["plant_ids"])
+            matnr = random.choices(ctx["material_ids"], weights=ctx["mat_weights"])[0]
+            mp = ctx["mat_persona"][matnr]
+            werks = random.choice(ctx["mat_plants"][matnr])
             lgort = random.choice(ctx["storage_locs"][werks])
             meins = ctx["material_uom"][matnr]
-            qty = _qty(1, 200)
-            order_items.append((vbeln, posnr))
-            items_for_order.append((vbeln, posnr))
-            order_item_data[(vbeln, posnr)] = {
-                "MATNR": matnr,
-                "WERKS": werks,
-                "LGORT": lgort,
-                "MEINS": meins,
-                "MENGE": qty,
-            }
-            rows.append(
+            qty = _lognorm(mp["base_qty"], 0.45, 1, 5000)
+            netwr = round(qty * mp["price"] * random.uniform(0.97, 1.03), 2)
+            order_netwr += netwr
+            requested = _next_wd(
+                min(
+                    erdat + timedelta(days=max(3, round(random.lognormvariate(math.log(30), 0.9)))),
+                    DEMAND_END,
+                )
+            )
+            rejected = random.random() < 0.02
+
+            # Causal status: old past-due orders are closed; recent past-due can be
+            # stuck (-> overdue backlog); future requested dates stay open.
+            if rejected or requested < ANCHOR - timedelta(days=90):
+                status, open_qty = "C", 0.0
+            elif requested < ANCHOR:
+                if random.random() < 0.92:
+                    status, open_qty = "C", 0.0
+                else:  # stuck order -> overdue backlog
+                    status = "B"
+                    open_qty = round(qty * random.uniform(0.2, 1.0), 2)
+            else:
+                status, open_qty = "A", qty
+            item_statuses.append(status)
+
+            vbap_rows.append(
                 {
                     "MANDT": MANDT,
                     "VBELN": vbeln,
@@ -395,213 +436,412 @@ def gen_vbap(ctx: dict) -> pd.DataFrame:
                     "MATKL": ctx["material_group"][matnr],
                     "MENGE": qty,
                     "MEINS": meins,
-                    "NETWR": _price(10, 5000),
-                    "WAERK": ctx["order_waerk"][vbeln],
+                    "NETWR": netwr,
+                    "WAERK": waerk,
                     "WERKS": werks,
                     "LGORT": lgort,
                     "PSTYV": random.choice(pstyv_vals),
-                    "ABGRU": "",
-                    "ERDAT": _fmt(ctx["order_dates"][vbeln]),
+                    "ABGRU": "01" if rejected else "",
+                    "ERDAT": _fmt(erdat),
                 }
             )
-        order_to_items[vbeln] = items_for_order
-    df = pd.DataFrame(rows)
-    ctx["order_items"] = order_items
-    ctx["order_item_data"] = order_item_data
-    ctx["order_to_items"] = order_to_items
-    _write(df, "VBAP")
-    return df
-
-
-def gen_likp(ctx: dict, coverage: float = 0.90) -> pd.DataFrame:
-    chosen_orders = random.sample(ctx["order_ids"], int(len(ctx["order_ids"]) * coverage))
-    rows = []
-    delivery_ids: list[str] = []
-    delivery_order: dict[str, str] = {}
-    for i, vbeln_ord in enumerate(chosen_orders, start=1):
-        vbeln_del = _pad(8_000_000_000 + i, 10)
-        kunnr = ctx["order_customer"][vbeln_ord]
-        erdat = ctx["order_dates"][vbeln_ord] + timedelta(days=random.randint(1, 3))
-        lfdat = erdat + timedelta(days=random.randint(3, 14))
-        wadat = lfdat + timedelta(days=random.randint(-2, 2))
-        wadat_ist = wadat + timedelta(days=random.randint(-2, 5))
-        delivery_ids.append(vbeln_del)
-        delivery_order[vbeln_del] = vbeln_ord
-        rows.append(
-            {
-                "MANDT": MANDT,
-                "VBELN": vbeln_del,
-                "LFART": random.choice(LFART_VALS),
-                "ERDAT": _fmt(min(erdat, DATE_END)),
-                "LFDAT": _fmt(min(lfdat, DATE_END)),
-                "WADAT": _fmt(min(wadat, DATE_END)),
-                "WADAT_IST": _fmt(min(wadat_ist, DATE_END)),
-                "KUNNR": kunnr,
-                "VKORG": "1000",
-                "VSTEL": random.choice(ctx["plant_ids"]),
-                "ROUTE": f"R{random.randint(1, 3):05d}",
-                "NETWR": _price(100, 20000),
-                "WAERK": ctx["order_waerk"][vbeln_ord],
-            }
-        )
-    df = pd.DataFrame(rows)
-    ctx["delivery_ids"] = delivery_ids
-    ctx["delivery_order"] = delivery_order
-    _write(df, "LIKP")
-    return df
-
-
-def gen_lips(ctx: dict) -> pd.DataFrame:
-    rows = []
-    for vbeln_del in ctx["delivery_ids"]:
-        vbeln_ord = ctx["delivery_order"][vbeln_del]
-        items = ctx["order_to_items"].get(vbeln_ord, [])
-        if not items:
-            continue
-        n_del_items = random.randint(1, min(5, len(items)))
-        del_date = ctx["order_dates"][vbeln_ord] + timedelta(days=random.randint(3, 14))
-        for del_pos, (ord_vbeln, ord_posnr) in enumerate(
-            random.sample(items, n_del_items), start=1
-        ):
-            info = ctx["order_item_data"][(ord_vbeln, ord_posnr)]
-            rows.append(
+            vbup_rows.append(
                 {
                     "MANDT": MANDT,
-                    "VBELN": vbeln_del,
-                    "POSNR": _pad(del_pos * 10, 6),
-                    "MATNR": info["MATNR"],
-                    "MATKL": ctx["material_group"][info["MATNR"]],
-                    "LFIMG": info["MENGE"],
-                    "MEINS": info["MEINS"],
-                    "WERKS": info["WERKS"],
-                    "LGORT": info["LGORT"],
-                    "VGBEL": ord_vbeln,
-                    "VGPOS": ord_posnr,
-                    "NETWR": _price(10, 5000),
-                    "BWART": random.choice(BWART_VALS),
-                    "MBDAT": _fmt(min(del_date, DATE_END)),
+                    "VBELN": vbeln,
+                    "POSNR": posnr,
+                    "GBSTA": status,
+                    "ABSTK": "",
+                    "WBSTK": status,
+                    "FKSTK": status,
+                    "LVSTK": status,
+                    "LSSTK": "",
+                    "KOSTA": "",
+                    "LFGSK": status,
                 }
             )
-    df = pd.DataFrame(rows)
-    _write(df, "LIPS")
-    return df
+            if open_qty > 0:
+                vbbe_rows.append(
+                    {
+                        "MANDT": MANDT,
+                        "VBELN": vbeln,
+                        "POSNR": posnr,
+                        "MATNR": matnr,
+                        "WERKS": werks,
+                        "MBDAT": _fmt(requested),
+                        "OMENG": open_qty,
+                        "VMENG": round(open_qty * random.uniform(0.85, 1.0), 2),
+                        "MEINS": meins,
+                        "BDART": random.choice(BDART_VALS),
+                        "AUART": auart,
+                        "KUNNR": kunnr,
+                    }
+                )
+                bucket = "overdue" if requested < ANCHOR else "future"
+                d = demand.setdefault((matnr, werks), {"overdue": 0.0, "future": 0.0})
+                d[bucket] += open_qty
 
-
-def gen_vbup(ctx: dict) -> pd.DataFrame:
-    rows = [
-        {
-            "MANDT": MANDT,
-            "VBELN": vbeln,
-            "POSNR": posnr,
-            "GBSTA": random.choices(STATUS_VALS, weights=[20, 30, 50])[0],
-            "ABSTK": "",
-            "WBSTK": random.choices(["A", "B", "C"], weights=[20, 40, 40])[0],
-            "FKSTK": random.choices(["A", "B", "C"], weights=[20, 30, 50])[0],
-            "LVSTK": random.choices(["A", "B", "C"], weights=[20, 30, 50])[0],
-            "LSSTK": "",
-            "KOSTA": "",
-            "LFGSK": random.choices(["A", "B", "C"], weights=[20, 30, 50])[0],
-        }
-        for vbeln, posnr in ctx["order_items"]
-    ]
-    df = pd.DataFrame(rows)
-    _write(df, "VBUP")
-    return df
-
-
-def gen_vbbe(ctx: dict, n: int = 15000) -> pd.DataFrame:
-    sample = random.sample(ctx["order_items"], min(n, len(ctx["order_items"])))
-    rows = []
-    for vbeln, posnr in sample:
-        info = ctx["order_item_data"][(vbeln, posnr)]
-        mbdat = ctx["order_dates"][vbeln] + timedelta(days=random.randint(1, 30))
-        omeng = info["MENGE"]
-        vmeng = round(omeng * random.uniform(0.8, 1.0), 2)
-        rows.append(
+        if all(s == "C" for s in item_statuses):
+            gbstk = "C"
+        elif all(s == "A" for s in item_statuses):
+            gbstk = "A"
+        else:
+            gbstk = "B"
+        vbak_rows.append(
             {
                 "MANDT": MANDT,
                 "VBELN": vbeln,
-                "POSNR": posnr,
-                "MATNR": info["MATNR"],
-                "WERKS": info["WERKS"],
-                "MBDAT": _fmt(min(mbdat, DATE_END)),
-                "OMENG": omeng,
-                "VMENG": vmeng,
-                "MEINS": info["MEINS"],
-                "BDART": random.choice(BDART_VALS),
-                "AUART": ctx["order_auart"][vbeln],
-                "KUNNR": ctx["order_customer"][vbeln],
+                "ERDAT": _fmt(erdat),
+                "ERZET": f"{random.randint(7, 18):02d}{random.randint(0, 59):02d}{random.randint(0, 59):02d}",
+                "ERNAM": random.choice(SAP_USERS),
+                "AUART": auart,
+                "KUNNR": kunnr,
+                "NETWR": round(order_netwr, 2),
+                "WAERK": waerk,
+                "VKORG": "1000",
+                "VTWEG": random.choice(["10", "20"]),
+                "SPART": random.choice(["01", "02"]),
+                "GBSTK": gbstk,
             }
         )
+
+    _write(pd.DataFrame(vbak_rows), "VBAK")
+    _write(pd.DataFrame(vbap_rows), "VBAP")
+    _write(pd.DataFrame(vbbe_rows), "VBBE")
+
+
+def gen_resb(ctx: dict) -> pd.DataFrame:
+    """Production reservations: withdrawn in the past, open in the future."""
+    rows = []
+    demand = ctx["demand"]
+    rsnum = 0
+    resb_combos = random.sample(ctx["marc_combos"], int(len(ctx["marc_combos"]) * 0.5))
+    for matnr, werks in resb_combos:
+        mp = ctx["mat_persona"][matnr]
+        lgort = random.choice(ctx["storage_locs"][werks])
+        n_lines = {
+            "A": random.randint(10, 18),
+            "B": random.randint(6, 12),
+            "C": random.randint(2, 6),
+        }[mp["class"]]
+        for _ in range(n_lines):
+            rsnum += 1
+            offset = random.randint(-90, 120)
+            bddat = _next_wd(ANCHOR + timedelta(days=offset))
+            qty = _lognorm(mp["base_qty"] * 0.8, 0.5, 1, 4000)
+            if bddat < ANCHOR:
+                if random.random() < 0.90:  # consumed
+                    enmng, kzear = qty, "X"
+                else:  # open overdue -> backlog
+                    enmng, kzear = round(qty * random.uniform(0.0, 0.6), 2), ""
+                    demand.setdefault((matnr, werks), {"overdue": 0.0, "future": 0.0})[
+                        "overdue"
+                    ] += round(qty - enmng, 2)
+            else:
+                enmng, kzear = 0.0, ""
+                demand.setdefault((matnr, werks), {"overdue": 0.0, "future": 0.0})["future"] += qty
+            rows.append(
+                {
+                    "MANDT": MANDT,
+                    "RSNUM": _pad(rsnum, 10),
+                    "RSPOS": _pad(random.randint(1, 10), 4),
+                    "RSART": random.choice(["M", "F", "N"]),
+                    "MATNR": matnr,
+                    "WERKS": werks,
+                    "LGORT": lgort,
+                    "BDMNG": qty,
+                    "ENMNG": enmng,
+                    "MEINS": ctx["material_uom"][matnr],
+                    "BDDAT": _fmt(bddat),
+                    "AUFNR": _pad(random.randint(1, 99999), 12),
+                    "VBELN": "",
+                    "KZEAR": kzear,
+                }
+            )
     df = pd.DataFrame(rows)
-    _write(df, "VBBE")
+    _write(df, "RESB")
     return df
 
 
-# ─── Layer 4 — Transaction MM ────────────────────────────────────────────────
+# ─── Layer 2b — Planning master data (needs realized demand) ─────────────────
 
 
-def gen_ekko(ctx: dict, n: int = 1800) -> pd.DataFrame:
+def gen_marc(ctx: dict) -> pd.DataFrame:
+    """Planning params sized to realized demand: safety stock ~ demand x lead time."""
     ekgrp_vals = ["B01", "B02", "B03"]
-    inco2_vals = ["Hamburg", "Rotterdam", "Stuttgart", "Munich", ""]
+    disls_vals = ["EX", "FX", "MB"]
+    dispo_vals = [f"D{i:03d}" for i in range(1, 6)]
     rows = []
-    po_ids: list[str] = []
-    po_dates: dict[str, date] = {}
-    po_currency: dict[str, str] = {}
-    for i in range(1, n + 1):
-        ebeln = _pad(4_500_000_000 + i, 10)
-        bedat = _rdate()
-        waers = random.choice(WAERS_VALS)
-        po_ids.append(ebeln)
-        po_dates[ebeln] = bedat
-        po_currency[ebeln] = waers
+    for matnr, werks in ctx["marc_combos"]:
+        mp = ctx["mat_persona"][matnr]
+        info = ctx["combo_info"][(matnr, werks)]
+        d = ctx["demand"].get((matnr, werks), {"overdue": 0.0, "future": 0.0})
+        daily_rate = d["future"] / 120.0
+        primary_vendor = ctx["mat_vendors"][matnr][0][0]
+        plifz = round(ctx["vendor_persona"][primary_vendor]["lt_mean"])
+        eisbe = round(max(daily_rate * math.sqrt(plifz) * 1.2, mp["base_qty"] * 0.2), 2)
+        minbe = round(eisbe + daily_rate * plifz, 2)
         rows.append(
+            {
+                "MANDT": MANDT,
+                "MATNR": matnr,
+                "WERKS": werks,
+                "EKGRP": random.choice(ekgrp_vals),
+                "DISMM": "PD" if daily_rate > 0 else random.choice(DISMM_VALS),
+                "DISPO": random.choice(dispo_vals),
+                "DISLS": random.choice(disls_vals),
+                "MINBE": minbe,
+                "EISBE": eisbe,
+                "MABST": round(max(minbe * random.uniform(2, 4), mp["base_qty"] * 2), 2),
+                "BESKZ": info["beskz"],
+                "PLIFZ": plifz,
+                "WEBAZ": random.choices([0, 1, 2, 3], weights=[20, 40, 30, 10])[0],
+                "MAABC": mp["class"],
+            }
+        )
+    df = pd.DataFrame(rows)
+    _write(df, "MARC")
+    return df
+
+
+def gen_mard(ctx: dict) -> pd.DataFrame:
+    """Stock sized to demand coverage; shortage combos get starved on purpose."""
+    rows = []
+    for matnr, werks in ctx["marc_combos"]:
+        mp = ctx["mat_persona"][matnr]
+        d = ctx["demand"].get((matnr, werks), {"overdue": 0.0, "future": 0.0})
+        daily_rate = d["future"] / 120.0
+        if (matnr, werks) in ctx["shortage_combos"]:
+            stock = d["overdue"] * random.uniform(0.0, 0.6) + daily_rate * random.uniform(0, 6)
+        elif daily_rate == 0 and d["overdue"] == 0:
+            stock = mp["base_qty"] * random.uniform(0, 10)  # slow movers / dead stock
+        else:
+            stock = d["overdue"] * random.uniform(0.9, 1.3) + daily_rate * random.uniform(15, 60)
+        lgort_pool = ctx["storage_locs"][werks]
+        n_locs = random.randint(1, 2)
+        locs = random.sample(lgort_pool, n_locs)
+        splits = [random.uniform(0.3, 1.0) for _ in locs]
+        total = sum(splits)
+        for lgort, frac in zip(locs, splits, strict=False):
+            rows.append(
+                {
+                    "MANDT": MANDT,
+                    "MATNR": matnr,
+                    "WERKS": werks,
+                    "LGORT": lgort,
+                    "LABST": round(stock * frac / total, 2),
+                    "UMLME": round(daily_rate * random.uniform(0, 3), 2),
+                    "INSME": round(daily_rate * random.uniform(0, 2), 2),
+                    "SPEME": (
+                        round(mp["base_qty"] * random.uniform(0, 1), 2)
+                        if random.random() < 0.05
+                        else 0.0
+                    ),
+                    "LFGJA": str(ANCHOR.year),
+                    "LFMON": str(ANCHOR.month).zfill(2),
+                }
+            )
+    df = pd.DataFrame(rows)
+    _write(df, "MARD")
+    return df
+
+
+# ─── Layer 4 — Transaction MM (purchasing + inbound deliveries) ──────────────
+
+
+def _plan_po_items(ctx: dict) -> list[dict]:
+    """Plan PO line items: historical replenishment + future supply sized to the
+    demand-vs-stock gap, split across the material's vendor panel by quota."""
+    hist_days = [d for d in _date_range(HIST_START, ANCHOR) if _is_wd(d)]
+    hist_weights = [_day_weight(d) for d in hist_days]
+    items: list[dict] = []
+    for matnr, werks in ctx["marc_combos"]:
+        if ctx["combo_info"][(matnr, werks)]["beskz"] != "F":
+            continue
+        mp = ctx["mat_persona"][matnr]
+        d = ctx["demand"].get((matnr, werks), {"overdue": 0.0, "future": 0.0})
+
+        # Historical POs: regular replenishment over 24 months
+        n_hist = {"A": random.randint(8, 12), "B": random.randint(4, 8), "C": random.randint(1, 4)}[
+            mp["class"]
+        ]
+        for _ in range(n_hist):
+            lifnr = random.choices(
+                [v for v, _ in ctx["mat_vendors"][matnr]],
+                weights=[s for _, s in ctx["mat_vendors"][matnr]],
+            )[0]
+            items.append(
+                {
+                    "matnr": matnr,
+                    "werks": werks,
+                    "lifnr": lifnr,
+                    "bedat": random.choices(hist_days, weights=hist_weights)[0],
+                    "qty": _lognorm(mp["base_qty"] * 4, 0.5, 2, 20000),
+                    "future": False,
+                }
+            )
+
+        # Future supply: cover open demand not covered by stock (with noise so a
+        # handful of materials end up under-supplied naturally)
+        stock_proxy = 0.0 if (matnr, werks) in ctx["shortage_combos"] else d["future"] * 0.3
+        need = (d["overdue"] + d["future"] - stock_proxy) * random.uniform(0.7, 1.25)
+        if (matnr, werks) in ctx["shortage_combos"]:
+            need *= random.uniform(0.1, 0.5)  # starve supply too
+        if need <= 0:
+            continue
+        for lifnr, share in ctx["mat_vendors"][matnr]:
+            qty = round(need * share, 2)
+            if qty < 1:
+                continue
+            items.append(
+                {
+                    "matnr": matnr,
+                    "werks": werks,
+                    "lifnr": lifnr,
+                    "bedat": _next_wd(ANCHOR - timedelta(days=random.randint(1, 30))),
+                    "qty": qty,
+                    "future": True,
+                }
+            )
+    return items
+
+
+def gen_purchasing(ctx: dict) -> None:
+    """EKKO/EKPO/EKET + inbound LIKP/LIPS + VBUP delivery statuses."""
+    planned = _plan_po_items(ctx)
+    planned.sort(key=lambda x: (x["lifnr"], x["bedat"]))
+
+    ekko_rows, ekpo_rows, eket_rows = [], [], []
+    receipt_events: list[dict] = []  # received goods -> LIKP/LIPS with WBSTK='C'
+    asn_events: list[dict] = []  # in transit -> LIKP/LIPS with WBSTK!='C'
+
+    po_seq = 0
+    idx = 0
+    while idx < len(planned):
+        first = planned[idx]
+        target_items = random.randint(1, 5)
+        group = [first]
+        j = idx + 1
+        while (
+            j < len(planned)
+            and len(group) < target_items
+            and planned[j]["lifnr"] == first["lifnr"]
+            and abs((planned[j]["bedat"] - first["bedat"]).days) <= 7
+        ):
+            group.append(planned[j])
+            j += 1
+        idx = j
+
+        po_seq += 1
+        ebeln = _pad(4_500_000_000 + po_seq, 10)
+        lifnr = first["lifnr"]
+        vp = ctx["vendor_persona"][lifnr]
+        bedat = first["bedat"]
+        waers = random.choices(WAERS_VALS, weights=[80, 15, 5])[0]
+        loekz_po = "L" if random.random() < 0.02 else ""
+        ekko_rows.append(
             {
                 "MANDT": MANDT,
                 "EBELN": ebeln,
                 "BUKRS": "1000",
-                "BSART": random.choice(BSART_VALS),
-                "LIFNR": random.choice(ctx["vendor_ids"]),
+                "BSART": random.choices(BSART_VALS, weights=[70, 20, 10])[0],
+                "LIFNR": lifnr,
                 "EKORG": "1000",
-                "EKGRP": random.choice(ekgrp_vals),
+                "EKGRP": random.choice(["B01", "B02", "B03"]),
                 "BEDAT": _fmt(bedat),
                 "WAERS": waers,
                 "STATU": random.choices(["", "1", "4", "5", "7"], weights=[20, 10, 30, 30, 10])[0],
-                "LOEKZ": random.choices(["", "L"], weights=[90, 10])[0],
+                "LOEKZ": loekz_po,
                 "INCO1": random.choice(INCO1_VALS),
-                "INCO2": random.choice(inco2_vals),
+                "INCO2": random.choice(["Hamburg", "Rotterdam", "Stuttgart", "Munich", ""]),
             }
         )
-    df = pd.DataFrame(rows)
-    ctx["po_ids"] = po_ids
-    ctx["po_dates"] = po_dates
-    ctx["po_currency"] = po_currency
-    _write(df, "EKKO")
-    return df
 
-
-def gen_ekpo(ctx: dict) -> pd.DataFrame:
-    rows = []
-    po_items: list[tuple[str, str]] = []
-    po_item_data: dict[tuple[str, str], dict] = {}
-    for ebeln in ctx["po_ids"]:
-        n_items = random.randint(1, 5)
-        for pos in range(1, n_items + 1):
+        for pos, item in enumerate(group, start=1):
             ebelp = _pad(pos * 10, 5)
-            matnr = random.choice(ctx["material_ids"])
-            werks = random.choice(ctx["plant_ids"])
-            meins = ctx["material_uom"][matnr]
-            qty = _qty(1, 500)
-            eindt = ctx["po_dates"][ebeln] + timedelta(days=random.randint(7, 90))
-            po_items.append((ebeln, ebelp))
-            po_item_data[(ebeln, ebelp)] = {
-                "MATNR": matnr,
-                "WERKS": werks,
-                "MEINS": meins,
-                "MENGE": qty,
-                "EINDT": eindt,
-            }
-            rows.append(
+            matnr, werks, qty = item["matnr"], item["werks"], item["qty"]
+            mp = ctx["mat_persona"][matnr]
+            netpr = round(mp["price"] * random.uniform(0.55, 0.75), 2)  # purchase < sales
+            loekz_item = "L" if (loekz_po or random.random() < 0.02) else ""
+
+            # Schedule lines: split qty across 1-4 delivery dates
+            n_lines = random.choices([1, 2, 3, 4], weights=[40, 30, 20, 10])[0]
+            line_qtys = [random.uniform(0.5, 1.5) for _ in range(n_lines)]
+            total_w = sum(line_qtys)
+            line_qtys = [round(qty * w / total_w, 2) for w in line_qtys]
+            fully_received = True
+            for etenr, line_qty in enumerate(line_qtys, start=1):
+                if item["future"]:
+                    eindt = _next_wd(
+                        ANCHOR + timedelta(days=random.randint(3, 150) + (etenr - 1) * 7)
+                    )
+                else:
+                    lt = max(3, random.gauss(vp["lt_mean"], vp["lt_std"]))
+                    eindt = _next_wd(bedat + timedelta(days=round(lt) + (etenr - 1) * 14))
+
+                # Receipt simulation per vendor persona
+                wemng = 0.0
+                if not item["future"] and not loekz_item:
+                    if random.random() < vp["otd_rate"]:
+                        delay = max(-2, round(random.gauss(0, 1.5)))
+                    else:
+                        delay = round(random.uniform(3, vp["late_extra"] + 8))
+                    arrival = _next_wd(eindt + timedelta(days=delay))
+                    if arrival <= ANCHOR and eindt <= ANCHOR:
+                        wemng = (
+                            line_qty
+                            if random.random() < 0.93
+                            else round(line_qty * random.uniform(0.5, 0.95), 2)
+                        )
+                        receipt_events.append(
+                            {
+                                "lifnr": lifnr,
+                                "werks": werks,
+                                "arrival": arrival,
+                                "ebeln": ebeln,
+                                "ebelp": ebelp,
+                                "matnr": matnr,
+                                "qty": wemng,
+                                "netpr": netpr,
+                                "waers": waers,
+                                "eindt": eindt,
+                            }
+                        )
+                    elif arrival <= ANCHOR + timedelta(days=45):
+                        # shipped, still on the road -> ASN
+                        asn_events.append(
+                            {
+                                "lifnr": lifnr,
+                                "werks": werks,
+                                "arrival": arrival,
+                                "ebeln": ebeln,
+                                "ebelp": ebelp,
+                                "matnr": matnr,
+                                "qty": line_qty,
+                                "netpr": netpr,
+                                "waers": waers,
+                                "eindt": eindt,
+                            }
+                        )
+                if wemng < line_qty:
+                    fully_received = False
+                eket_rows.append(
+                    {
+                        "MANDT": MANDT,
+                        "EBELN": ebeln,
+                        "EBELP": ebelp,
+                        "ETENR": _pad(etenr, 4),
+                        "EINDT": _fmt(eindt),
+                        "SLFDT": _fmt(eindt + timedelta(days=random.randint(-3, 3))),
+                        "MENGE": line_qty,
+                        "WEMNG": wemng,
+                        "BANFN": _pad(random.randint(1, 9999), 10),
+                        "MBDAT": _fmt(eindt - timedelta(days=random.randint(1, 5))),
+                        "WADAT": _fmt(eindt - timedelta(days=random.randint(2, 10))),
+                    }
+                )
+
+            ekpo_rows.append(
                 {
                     "MANDT": MANDT,
                     "EBELN": ebeln,
@@ -610,134 +850,114 @@ def gen_ekpo(ctx: dict) -> pd.DataFrame:
                     "WERKS": werks,
                     "MATKL": ctx["material_group"][matnr],
                     "MENGE": qty,
-                    "MEINS": meins,
-                    "NETPR": _price(5, 1000),
-                    "NETWR": round(qty * _price(5, 1000), 2),
+                    "MEINS": ctx["material_uom"][matnr],
+                    "NETPR": netpr,
+                    "NETWR": round(qty * netpr, 2),
                     "PSTYP": random.choices(["0", "2", "9"], weights=[70, 20, 10])[0],
-                    "ELIKZ": random.choices(["", "X"], weights=[60, 40])[0],
-                    "LOEKZ": random.choices(["", "L"], weights=[95, 5])[0],
+                    "ELIKZ": "X" if fully_received and not item["future"] else "",
+                    "LOEKZ": loekz_item,
                 }
             )
-    df = pd.DataFrame(rows)
-    ctx["po_items"] = po_items
-    ctx["po_item_data"] = po_item_data
-    _write(df, "EKPO")
-    return df
+
+    _write(pd.DataFrame(ekko_rows), "EKKO")
+    _write(pd.DataFrame(ekpo_rows), "EKPO")
+    _write(pd.DataFrame(eket_rows), "EKET")
+    gen_inbound_deliveries(ctx, receipt_events, asn_events)
 
 
-def gen_eket(ctx: dict) -> pd.DataFrame:
-    rows = []
-    for ebeln, ebelp in ctx["po_items"]:
-        item = ctx["po_item_data"][(ebeln, ebelp)]
-        eindt = item["EINDT"]
-        gr_qty = round(item["MENGE"] * random.uniform(0, 1), 2)
-        mbdat = min(eindt - timedelta(days=random.randint(1, 5)), DATE_END)
-        rows.append(
-            {
-                "MANDT": MANDT,
-                "EBELN": ebeln,
-                "EBELP": ebelp,
-                "ETENR": "0001",
-                "EINDT": _fmt(min(eindt, DATE_END)),
-                "SLFDT": _fmt(min(eindt + timedelta(days=random.randint(-3, 3)), DATE_END)),
-                "MENGE": item["MENGE"],
-                "WEMNG": gr_qty,
-                "BANFN": _pad(random.randint(1, 9999), 10),
-                "MBDAT": _fmt(mbdat),
-                "WADAT": _fmt(min(eindt + timedelta(days=random.randint(0, 3)), DATE_END)),
-            }
-        )
-    df = pd.DataFrame(rows)
-    _write(df, "EKET")
-    return df
+def gen_inbound_deliveries(ctx: dict, receipts: list[dict], asns: list[dict]) -> None:
+    """LIKP/LIPS as inbound deliveries (LFART='EL'), VGBEL -> PO number.
+    Received deliveries get VBUP WBSTK='C'; in-transit ASNs stay 'A'/'B'."""
+    likp_rows, lips_rows = [], []
+    vbup_rows = ctx["vbup_rows"]
+    del_seq = 0
 
+    def emit(events: list[dict], received: bool) -> None:
+        nonlocal del_seq
+        events.sort(key=lambda e: (e["lifnr"], e["arrival"], e["werks"]))
+        i = 0
+        while i < len(events):
+            head = events[i]
+            group = [head]
+            j = i + 1
+            while (
+                j < len(events)
+                and len(group) < 4
+                and events[j]["lifnr"] == head["lifnr"]
+                and events[j]["arrival"] == head["arrival"]
+                and events[j]["werks"] == head["werks"]
+            ):
+                group.append(events[j])
+                j += 1
+            i = j
 
-def gen_mkpf(ctx: dict, n: int = 3000) -> pd.DataFrame:
-    rows = []
-    matdoc_ids: list[tuple[str, str]] = []
-    matdoc_dates: dict[tuple[str, str], date] = {}
-    for i in range(1, n + 1):
-        mblnr = _pad(5_000_000_000 + i, 10)
-        budat = _rdate()
-        mjahr = str(budat.year)
-        matdoc_ids.append((mblnr, mjahr))
-        matdoc_dates[(mblnr, mjahr)] = budat
-        rows.append(
-            {
-                "MANDT": MANDT,
-                "MBLNR": mblnr,
-                "MJAHR": mjahr,
-                "BLDAT": _fmt(budat),
-                "BUDAT": _fmt(budat),
-                "USNAM": random.choice(SAP_USERS),
-                "CPUDT": _fmt(budat),
-            }
-        )
-    df = pd.DataFrame(rows)
-    ctx["matdoc_ids"] = matdoc_ids
-    ctx["matdoc_dates"] = matdoc_dates
-    _write(df, "MKPF")
-    return df
-
-
-def gen_mseg(ctx: dict) -> pd.DataFrame:
-    rows = []
-    for mblnr, mjahr in ctx["matdoc_ids"]:
-        n_items = random.randint(1, 4)
-        for zeile in range(1, n_items + 1):
-            matnr = random.choice(ctx["material_ids"])
-            werks = random.choice(ctx["plant_ids"])
-            rows.append(
+            del_seq += 1
+            vbeln = _pad(8_000_000_000 + del_seq, 10)
+            arrival = head["arrival"]
+            netwr = round(sum(e["qty"] * e["netpr"] for e in group), 2)
+            likp_rows.append(
                 {
                     "MANDT": MANDT,
-                    "MBLNR": mblnr,
-                    "MJAHR": mjahr,
-                    "ZEILE": _pad(zeile, 4),
-                    "BWART": random.choice(BWART_VALS),
-                    "MATNR": matnr,
-                    "WERKS": werks,
-                    "LGORT": random.choice(ctx["storage_locs"][werks]),
-                    "MENGE": _qty(1, 500),
-                    "MEINS": ctx["material_uom"][matnr],
-                    "DMBTR": _price(10, 50000),
-                    "WAERS": random.choice(WAERS_VALS),
-                    "BUDAT": _fmt(ctx["matdoc_dates"][(mblnr, mjahr)]),
+                    "VBELN": vbeln,
+                    "LFART": "EL",
+                    "ERDAT": _fmt(arrival),
+                    "LFDAT": _fmt(head["eindt"]),
+                    "WADAT": _fmt(arrival - timedelta(days=random.randint(2, 12))),
+                    "WADAT_IST": _fmt(arrival) if received else "",
+                    "KUNNR": "",
+                    "VKORG": "1000",
+                    "VSTEL": head["werks"],
+                    "ROUTE": f"R{random.randint(1, 3):05d}",
+                    "NETWR": netwr,
+                    "WAERK": head["waers"],
                 }
             )
-    df = pd.DataFrame(rows)
-    _write(df, "MSEG")
-    return df
+            status = "C" if received else random.choice(["A", "B"])
+            for pos, e in enumerate(group, start=1):
+                posnr = _pad(pos * 10, 6)
+                lips_rows.append(
+                    {
+                        "MANDT": MANDT,
+                        "VBELN": vbeln,
+                        "POSNR": posnr,
+                        "MATNR": e["matnr"],
+                        "MATKL": ctx["material_group"][e["matnr"]],
+                        "LFIMG": e["qty"],
+                        "MEINS": ctx["material_uom"][e["matnr"]],
+                        "WERKS": e["werks"],
+                        "LGORT": random.choice(ctx["storage_locs"][e["werks"]]),
+                        "VGBEL": e["ebeln"],
+                        "VGPOS": e["ebelp"],
+                        "NETWR": round(e["qty"] * e["netpr"], 2),
+                        "BWART": "101",
+                        "MBDAT": _fmt(e["eindt"]),
+                    }
+                )
+                vbup_rows.append(
+                    {
+                        "MANDT": MANDT,
+                        "VBELN": vbeln,
+                        "POSNR": posnr,
+                        "GBSTA": status,
+                        "ABSTK": "",
+                        "WBSTK": status,
+                        "FKSTK": "",
+                        "LVSTK": status,
+                        "LSSTK": "",
+                        "KOSTA": "",
+                        "LFGSK": status,
+                    }
+                )
+
+    emit(receipts, received=True)
+    emit(asns, received=False)
+    _write(pd.DataFrame(likp_rows), "LIKP")
+    _write(pd.DataFrame(lips_rows), "LIPS")
 
 
-def gen_resb(ctx: dict, n: int = 1500) -> pd.DataFrame:
-    rows = []
-    for i in range(1, n + 1):
-        matnr = random.choice(ctx["material_ids"])
-        werks = random.choice(ctx["plant_ids"])
-        lgort = random.choice(ctx["storage_locs"][werks])
-        req_qty = _qty(1, 300)
-        withdrawn = round(req_qty * random.uniform(0, 1), 2)
-        req_date = _rdate()
-        rows.append(
-            {
-                "MANDT": MANDT,
-                "RSNUM": _pad(i, 10),
-                "RSPOS": _pad(random.randint(1, 10), 4),
-                "RSART": random.choice(["M", "F", "N"]),
-                "MATNR": matnr,
-                "WERKS": werks,
-                "LGORT": lgort,
-                "BDMNG": req_qty,
-                "ENMNG": withdrawn,
-                "MEINS": ctx["material_uom"][matnr],
-                "BDDAT": _fmt(min(req_date, DATE_END)),
-                "AUFNR": "",
-                "VBELN": random.choice(ctx["order_ids"]) if random.random() < 0.5 else "",
-                "KZEAR": "X" if withdrawn >= req_qty else "",
-            }
-        )
-    df = pd.DataFrame(rows)
-    _write(df, "RESB")
+def gen_vbup(ctx: dict) -> pd.DataFrame:
+    df = pd.DataFrame(ctx["vbup_rows"])
+    _write(df, "VBUP")
     return df
 
 
@@ -745,41 +965,51 @@ def gen_resb(ctx: dict, n: int = 1500) -> pd.DataFrame:
 
 
 def main() -> None:
+    global ANCHOR, HIST_START, DEMAND_END, SUPPLY_END, SUFFIX
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--anchor",
+        type=lambda s: date.fromisoformat(s),
+        default=date.today(),
+        help="'Today' for the dataset (YYYY-MM-DD). History/future generated around it.",
+    )
+    args = parser.parse_args()
+    ANCHOR = args.anchor
+    HIST_START = ANCHOR - timedelta(days=730)
+    DEMAND_END = ANCHOR + timedelta(days=130)
+    SUPPLY_END = ANCHOR + timedelta(days=180)
+    SUFFIX = f"_{ANCHOR:%Y%m%d}.csv"
+
     ctx: dict = {}
-    print("Generating synthetic SAP ECC 6.0 data...\n")
+    print(f"Generating synthetic SAP ECC 6.0 data (anchor = {ANCHOR})...\n")
 
     print("Layer 0 — Config")
     gen_t001w(ctx)
     gen_tfact(ctx)
 
-    print("\nLayer 1 — Master Data")
+    print("\nLayer 1 — Master Data + Personas")
+    build_material_personas(ctx)
     gen_mara(ctx)
     gen_kna1(ctx)
     gen_lfa1(ctx)
 
-    print("\nLayer 2 — Master Data Extended")
-    gen_marc(ctx)
-    gen_mard(ctx)
-    gen_equk(ctx)
-    gen_equp(ctx)
+    print("\nLayer 2 — Material-Plant + Quota")
+    build_marc_combos(ctx)
+    gen_equk_equp(ctx)
 
-    print("\nLayer 3 — Transaction SD")
-    gen_vbak(ctx)
-    gen_vbap(ctx)
-    gen_likp(ctx)
-    gen_lips(ctx)
-    gen_vbup(ctx)
-    gen_vbbe(ctx)
-
-    print("\nLayer 4 — Transaction MM")
-    gen_ekko(ctx)
-    gen_ekpo(ctx)
-    gen_eket(ctx)
-    gen_mkpf(ctx)
-    gen_mseg(ctx)
+    print("\nLayer 3 — Demand (SD + production)")
+    gen_sales(ctx)
     gen_resb(ctx)
 
-    print("\nDone.")
+    print("\nLayer 2b — Planning Master Data (demand-informed)")
+    gen_marc(ctx)
+    gen_mard(ctx)
+
+    print("\nLayer 4 — Purchasing + Inbound Deliveries")
+    gen_purchasing(ctx)
+    gen_vbup(ctx)
+
+    print(f"\nDone. Anchor={ANCHOR}, shortage combos={len(ctx['shortage_combos'])}.")
 
 
 if __name__ == "__main__":
