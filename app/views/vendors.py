@@ -6,7 +6,7 @@ from db import get_vendor_performance
 ui.setup()
 ui.page_header(
     "🚚 Vendor Performance",
-    "OTD đo trên deliveries đã GR hoàn tất; late shipments từ SA chưa được ASN cover",
+    "OTD measured on goods-receipt-completed deliveries; late shipments = SA quantities not yet covered by ASN",
 )
 
 df = get_vendor_performance()
@@ -29,10 +29,10 @@ st.divider()
 
 col_left, col_right = st.columns([1, 1])
 
-# ── Bar: 10 vendors OTD tệ nhất ────────────────────────────────────────────
+# ── Bar: 10 worst vendors by OTD ───────────────────────────────────────────
 with col_left:
     st.subheader("Bottom 10 — On-Time Delivery")
-    bottom = rated.head(10).iloc[::-1]  # reverse để bar tệ nhất nằm trên cùng
+    bottom = rated.head(10).iloc[::-1]  # reversed so the worst bar sits on top
     colors = [
         ui.PALETTE["bad"] if v < 0.6 else ui.PALETTE["warn"] if v < 0.85 else ui.PALETTE["good"]
         for v in bottom["otd_rate"]

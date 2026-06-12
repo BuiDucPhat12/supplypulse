@@ -5,7 +5,7 @@ from db import get_shortage_report
 ui.setup()
 ui.page_header(
     "🚨 Shortage Overview",
-    "Materials at risk trong transit-time window — nguồn: mart_shortage_report",
+    "Materials at risk within their transit-time window — source: mart_shortage_report",
 )
 
 df = get_shortage_report()
@@ -91,5 +91,5 @@ if event.selection.rows:
     st.session_state["selected_marc_id"] = row["marc_id"]
     st.page_link(
         "views/simulation.py",
-        label=f"📈 Xem simulation cho {row['material_number']} @ {row['plant']}",
+        label=f"📈 Open simulation for {row['material_number']} @ {row['plant']}",
     )

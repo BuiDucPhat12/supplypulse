@@ -1,4 +1,4 @@
-"""Design system dùng chung cho mọi page: palette, plotly template, CSS."""
+"""Shared design system for all pages: palette, plotly template, CSS."""
 
 import plotly.graph_objects as go
 import plotly.io as pio
@@ -22,7 +22,7 @@ PALETTE = {
 
 
 def setup() -> None:
-    """Gọi đầu mỗi page: đăng ký plotly template + CSS cho metric cards."""
+    """Call at the top of every page: registers the plotly template + metric-card CSS."""
     template = go.layout.Template(
         layout=dict(
             paper_bgcolor="rgba(0,0,0,0)",

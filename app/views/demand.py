@@ -7,7 +7,7 @@ from db import get_backlog_by_plant, get_consumption_trend, get_top_demand_mater
 ui.setup()
 ui.page_header(
     "📊 Demand & Backlog",
-    "Future demand 120 ngày (mart_consumption) + overdue backlog theo plant",
+    "120-day future demand (mart_consumption) + overdue backlog by plant",
 )
 
 trend = get_consumption_trend()
@@ -23,7 +23,7 @@ k3.metric("Materials w/ Backlog", f"{int(backlog['materials_with_backlog'].sum()
 
 st.divider()
 
-# ── Consumption trend (stacked theo plant, weekly) ─────────────────────────
+# ── Consumption trend (stacked by plant, weekly) ───────────────────────────
 st.subheader("Demand Trend (weekly, by plant)")
 weekly = (
     trend.set_index("requirement_date")

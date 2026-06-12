@@ -8,10 +8,10 @@ from plotly.subplots import make_subplots
 ui.setup()
 ui.page_header(
     "📈 Inventory Simulation",
-    "Tồn kho mô phỏng 120 ngày: stock − backlog − consumption lũy kế + ASN lũy kế",
+    "120-day projected inventory: stock − backlog − cumulative consumption + cumulative ASN arrivals",
 )
 
-# ── Material selector (pre-select từ Overview nếu có) ──────────────────────
+# ── Material selector (pre-selected from Overview if set) ──────────────────
 report = get_shortage_report()
 report["label"] = report["material_number"] + " | " + report["plant"] + " | " + report["status"]
 options = report.set_index("marc_id")["label"].to_dict()
@@ -61,7 +61,7 @@ fig = make_subplots(
     subplot_titles=("Simulated Inventory", "Daily Consumption vs ASN Arrival"),
 )
 
-# TT window — vùng không thể can thiệp (hàng đang trên đường)
+# TT window — nothing can be expedited here (goods already in transit)
 fig.add_vrect(
     x0=df["calendar_date"].min(),
     x1=end_of_tt,
@@ -110,7 +110,7 @@ if not red_df.empty:
         col=1,
     )
 
-# Safety stock reference — so sánh với mức an toàn, không chỉ với 0
+# Safety stock reference — compare against safety level, not just zero
 fig.add_hline(
     y=float(row["safety_stock"]),
     line_dash="dash",
