@@ -19,6 +19,8 @@ not a textbook star schema.
 
 ## The cockpit
 
+![SupplyPulse cockpit demo](docs/img/demo.gif)
+
 | Shortage Overview | Inventory Simulation |
 |---|---|
 | ![Shortage Overview](docs/img/overview.png) | ![Inventory Simulation](docs/img/simulation.png) |
