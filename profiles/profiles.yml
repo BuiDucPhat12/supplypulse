@@ -1,9 +1,20 @@
 supplypulse_dbt:
   target: dev
   outputs:
+    # dev: used by the Airflow containers (postgres = docker-compose service name)
     dev:
       type: postgres
       host: postgres
+      port: 5432
+      user: supplypulse
+      password: supplypulse123
+      dbname: supplypulse
+      schema: public
+      threads: 4
+    # local: used from the host machine and in CI (dbt build --target local)
+    local:
+      type: postgres
+      host: localhost
       port: 5432
       user: supplypulse
       password: supplypulse123

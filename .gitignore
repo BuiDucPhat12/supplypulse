@@ -21,3 +21,4 @@ data/
 .claude/
 logs/
 docs/notes/.obsidian/
+profiles/.user.yml
