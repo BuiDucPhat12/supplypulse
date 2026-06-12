@@ -53,7 +53,7 @@ The marts are not simple aggregations — they encode planner logic end to end:
 
 ## Realistic synthetic data
 
-No production data leaves Bosch — the source is a ~95k-row synthetic generator
+No production data leaves the company — the source is a ~95k-row synthetic generator
 ([`scripts/generate_synthetic_data.py`](scripts/generate_synthetic_data.py)) that
 reproduces 19 SAP ECC 6.0 tables (SD + MM: `VBAK/VBAP`, `EKKO/EKPO/EKET`, `LIKP/LIPS`,
 `MARC/MARD`, `EQUK/EQUP`, `RESB`, `VBBE`, `LFA1`, …) with schemas cross-checked against

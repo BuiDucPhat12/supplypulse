@@ -114,10 +114,10 @@ def _write(df: pd.DataFrame, table: str) -> None:
 
 def gen_t001w(ctx: dict) -> pd.DataFrame:
     plants = [
-        ("1000", "Bosch Stuttgart", "BW", "Stuttgart", "01"),
-        ("1001", "Bosch Munich", "BY", "Munich", "02"),
-        ("1002", "Bosch Berlin", "BE", "Berlin", "03"),
-        ("1003", "Bosch Leipzig", "SN", "Leipzig", "01"),
+        ("1000", "Werk Stuttgart", "BW", "Stuttgart", "01"),
+        ("1001", "Werk Munich", "BY", "Munich", "02"),
+        ("1002", "Werk Berlin", "BE", "Berlin", "03"),
+        ("1003", "Werk Leipzig", "SN", "Leipzig", "01"),
     ]
     rows = [
         {

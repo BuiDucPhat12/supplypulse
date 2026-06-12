@@ -62,7 +62,7 @@ PP để lại Phase sau khi SD+MM pipeline đã ổn định.
 | LFA1  | Vendor Master        | MD   | LIFNR                  | small (~3K rows)| daily   | PII: NAME1, ORT01 cần mask |
 | RESB  | Reservation/Dep. Req | TX   | RSNUM, RSPOS           | ~500/day        | hourly  | Material reservations; links sales orders → stock commit |
 
-> **Volume trên là ước tính mẫu.** Với Bosch production: VBAP/MSEG thường lớn hơn nhiều (có thể 50K-500K/day). Điền lại khi bạn có số thực tế.
+> **Volume trên là ước tính mẫu.** Với production thực tế: VBAP/MSEG thường lớn hơn nhiều (có thể 50K-500K/day). Điền lại khi bạn có số thực tế.
 
 ### 1.3 Organisation & Configuration Data
 
@@ -344,7 +344,7 @@ PP để lại Phase sau khi SD+MM pipeline đã ổn định.
 
 ## 3. Khối lượng & growth
 
-> Số ước tính bên dưới là **synthetic baseline** cho portfolio (Bosch mid-size plant). Cần cập nhật nếu có số thực.
+> Số ước tính bên dưới là **synthetic baseline** cho portfolio (mid-size plant). Cần cập nhật nếu có số thực.
 
 | Bảng | Rows hiện tại (ước) | Rows/day | Bronze size/year (CSV) | Strategy     |
 | ---- | ------------------- | -------- | ---------------------- | ------------ |
@@ -362,7 +362,7 @@ PP để lại Phase sau khi SD+MM pipeline đã ổn định.
 **Rule of thumb áp dụng:**
 - Master data (MARA, MARC, MARD, LFA1, KNA1) → full reload vì nhỏ, thay đổi không dự đoán được
 - Transaction data (VBAK, VBAP, EKKO, EKPO, MSEG) → incremental theo ngày tạo (`ERDAT`/`BEDAT`/`BUDAT`)
-- MSEG là bảng lớn nhất — nếu Bosch production > 5M rows thì **bắt buộc incremental**
+- MSEG là bảng lớn nhất — nếu production > 5M rows thì **bắt buộc incremental**
 
 ---
 
@@ -391,11 +391,11 @@ Có 3 hướng, chọn 1:
 
 ```
 Phase 1 (portfolio): Generate synthetic CSV bằng Python + Faker, đúng schema SAP ECC 6.0.
-Lý do: không export production data Bosch vì compliance. Synthetic đủ để demo pipeline end-to-end
+Lý do: không export production data của công ty vì compliance. Synthetic đủ để demo pipeline end-to-end
 và chứng minh hiểu schema SAP.
 
 Phase 5+ (nếu có quyền): cân nhắc approach (B) pyrfc hoặc (A) Open Hub Service.
-Approach (C) CDC/Debezium bị loại ngay vì không có database-level access ở Bosch.
+Approach (C) CDC/Debezium bị loại ngay vì không có database-level access ở công ty.
 ```
 
 ---
@@ -405,9 +405,9 @@ Approach (C) CDC/Debezium bị loại ngay vì không có database-level access 
 - [x] Đã review danh sách field PII: ERNAM (created_by), KUNNR/KNA1.NAME1 (customer), LFA1.NAME1 (vendor)
 - [x] Approach: dùng synthetic data → PII không tồn tại. Nếu sau này dùng real data, hash SHA-256 trước Bronze.
 - [x] Không commit data lên Git — `data/` đã có trong `.gitignore`
-- [ ] Nếu muốn dùng real data (kể cả đã anonymize): phải hỏi IT-Compliance Bosch trước
+- [ ] Nếu muốn dùng real data (kể cả đã anonymize): phải hỏi IT-Compliance của công ty trước
 
-> **Tuyệt đối không** copy data thật của Bosch lên repo public. Khi cần show ra ngoài, tốt nhất generate synthetic data **đúng schema** trên cùng cấu trúc đã thiết kế.
+> **Tuyệt đối không** copy data thật của công ty lên repo public. Khi cần show ra ngoài, tốt nhất generate synthetic data **đúng schema** trên cùng cấu trúc đã thiết kế.
 
 ---
 
@@ -421,8 +421,8 @@ Approach (C) CDC/Debezium bị loại ngay vì không có database-level access 
 ## 7. Open questions
 
 - [x] ~~SAP version?~~ → ECC 6.0 classic. Không có ACDOCA.
-- [ ] Bosch có bảng **custom Z\*** không? (vd ZVBAK_EXT cho thêm field nội bộ) — nếu có, cần thêm vào Section 1
-- [ ] Bosch dùng **fiscal year** đặc biệt không? (T009 — ảnh hưởng cách group by period trong dbt marts)
+- [ ] Công ty có bảng **custom Z\*** không? (vd ZVBAK_EXT cho thêm field nội bộ) — nếu có, cần thêm vào Section 1
+- [ ] Công ty dùng **fiscal year** đặc biệt không? (T009 — ảnh hưởng cách group by period trong dbt marts)
 - [ ] Plant code (`WERKS`) của bạn là gì? (cần để filter synthetic data realistic)
 
 Khi điền xong ERD (Section 6) và commit, ping: *"Step 1.1 xong, qua step kế."*

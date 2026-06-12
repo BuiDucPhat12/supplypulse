@@ -1,7 +1,7 @@
 # Step 1.2 — Generate Synthetic SAP Data
 
 > **Status:** PLAN — chưa bắt đầu code
-> **Mục tiêu:** Tạo CSV files giả lập đúng schema SAP ECC 6.0, đủ referential integrity để chạy pipeline end-to-end mà không dùng data thật của Bosch.
+> **Mục tiêu:** Tạo CSV files giả lập đúng schema SAP ECC 6.0, đủ referential integrity để chạy pipeline end-to-end mà không dùng data thật của công ty.
 
 ---
 
@@ -12,7 +12,7 @@
 | D1 | Date range | 2022-01-01 → 2024-12-31 | 3 năm đủ để test seasonal pattern, không quá nặng |
 | D2 | Volume mode | Dev volume (~10% ước tính thật) | Đủ chạy pipeline, nhanh generate, dễ debug |
 | D3 | MANDT (SAP client) | `100` | Chuẩn SAP sandbox/dev |
-| D4 | Plant codes | `1000`, `1001`, `1002`, '1003' | Bosch-style 4-digit numeric |
+| D4 | Plant codes | `1000`, `1001`, `1002`, '1003' | SAP-style 4-digit numeric |
 | D5 | Output path | `data/raw/se16/<TABLE>/<TABLE>_20241231.csv` | Giả lập 1 lần extract cuối năm |
 | D6 | Encoding | UTF-8, comma delimiter | Standard cho downstream pipeline |
 | D7 | NULL representation | empty string ` ` | Không dùng `NULL` hay `\N` |
