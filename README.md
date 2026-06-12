@@ -75,7 +75,8 @@ generate_synthetic_data.py  →  load_bronze.py  →  dbt build  →  Streamlit
 ```
 
 - **dbt**: 17 staging views → 21 intermediate tables → 5 marts, 1 seed,
-  **29 data tests** (`dbt build` = 73/73 PASS). Lineage documented in
+  **29 data tests** (`dbt build` = 73/73 PASS). Browse the interactive lineage graph
+  in the **[hosted dbt docs](https://buiducphat12.github.io/supplypulse/)**, or read
   [`docs/DATA_LINEAGE.md`](docs/DATA_LINEAGE.md).
 - **Airflow** runs the whole chain daily (`dags/daily_pipeline.py`).
 - **CI** (GitHub Actions) lints, runs pytest, then executes the full pipeline —
@@ -138,6 +139,7 @@ The optional Airflow stack (`docker compose up -d`) schedules the same pipeline 
 
 ## Docs worth reading
 
+- **[Hosted dbt docs](https://buiducphat12.github.io/supplypulse/)** — interactive lineage graph, columns, compiled SQL for all 43 models
 - [`docs/DATA_LINEAGE.md`](docs/DATA_LINEAGE.md) — every model explained, bronze → mart
 - [`docs/PRODUCTION_LOGIC.md`](docs/PRODUCTION_LOGIC.md) — the planner logic the marts encode
 - [`docs/sap_source_design.md`](docs/sap_source_design.md) — 19-table SAP source design + field dictionary
