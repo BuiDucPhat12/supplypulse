@@ -1,15 +1,26 @@
-Welcome to your new dbt project!
+# supplypulse_dbt
 
-### Using the starter project
+The transformation layer of [SupplyPulse](../README.md): 17 staging views →
+21 intermediate tables → 5 marts, plus 1 seed and 29 data tests (73 resources total).
 
-Try running the following commands:
-- dbt run
-- dbt test
+```
+bronze (raw TEXT)            -- loaded by scripts/load_bronze.py
+  → staging   (views)        -- rename, cast, light cleaning, 1:1 with source tables
+  → intermediate (tables)    -- planner logic: calendars, transit times, backlog,
+                             --   ASN coverage, late shipments, supply reconstruction
+  → analytics (marts)        -- shortage report, 120-day inventory simulation,
+                             --   vendor performance, consumption, detail supply
+```
 
+Model-by-model documentation lives in [`../docs/DATA_LINEAGE.md`](../docs/DATA_LINEAGE.md).
 
-### Resources:
-- Learn more about dbt [in the docs](https://docs.getdbt.com/docs/introduction)
-- Check out [Discourse](https://discourse.getdbt.com/) for commonly asked questions and answers
-- Join the [chat](https://community.getdbt.com/) on Slack for live discussions and support
-- Find [dbt events](https://events.getdbt.com) near you
-- Check out [the blog](https://blog.getdbt.com/) for the latest news on dbt's development and best practices
+## Usage
+
+```bash
+dbt deps                                               # install dbt_utils
+dbt build --profiles-dir ../profiles --target local    # run + test everything
+dbt test --select marts                                # just the mart tests
+```
+
+Targets: `local` (host machine / CI, connects to localhost) and `dev`
+(default, used inside the Airflow containers where the host is `postgres`).
